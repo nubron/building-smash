@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<title>철거반장</title>
+<title>하늘베기</title>
 <style>
   html, body {
     margin: 0; height: 100%; overflow: hidden; background: #111;
@@ -35,7 +35,7 @@
   <div class="btn" data-k="ArrowLeft" style="left:16px;bottom:16px">◀</div>
   <div class="btn" data-k="ArrowRight" style="left:92px;bottom:16px">▶</div>
   <div class="btn" data-k="ArrowDown" style="right:92px;bottom:16px">막기</div>
-  <div class="btn" data-k="KeyZ" style="right:16px;bottom:16px">공격</div>
+  <div class="btn" data-k="KeyZ" style="right:16px;bottom:16px">베기</div>
   <div class="btn" data-k="ArrowUp" style="right:92px;bottom:92px">점프</div>
   <div class="btn" data-k="KeyX" style="right:16px;bottom:92px">필살</div>
 </div>
@@ -48,7 +48,7 @@ var W = 960, H = 540, GROUND = 480, FLOOR_H = 32;
 var WORLD_TOP = -3000;                                 // 세계 맨 위 (카메라 한계, 새 건물 등장 위치)
 var PW = 36, PH = 56, HEAD_Y = GROUND - PH;          // HEAD_Y: 깔림 판정선
 var GRAVITY = 1500, MOVE_SPEED = 280;
-var ROCKET_V = 1600, ROCKET_TOP = 40, PIERCE_MAX = 4;  // ↑: 중력 없이 솟구침 (건물 밖이면 WORLD_TOP+ROCKET_TOP까지), 휘두르며 닿으면 최대 4층 돌파
+var ROCKET_V = 1600, ROCKET_TOP = 40, PIERCE_MAX = 4;  // ↑: 중력 없이 솟구침 (건물 밖이면 WORLD_TOP+ROCKET_TOP까지), 베면서 닿으면 최대 4층 돌파
 var ATK_TIME = 0.12, ATK_COOLDOWN = 0.2, ATK_REACH = 46;
 var GUARD_PUSH = 90, AIR_GUARD_PUSH = 50, CRUSH_PUSH = 220;
 var GUARD_COST = 15, GUARD_REGEN = 6;                  // 방어 게이지: 1회 소모량, 초당 회복량
@@ -61,13 +61,15 @@ var HIT_STUN = 0.1, CHAIN_FALL_V = 60;                 // 맞은 건물의 경�
 var CHAIN_FREE = 8, CHAIN_STEPS = 6, B_VMAX_CHAIN = 900, HIT_STUN_MIN = 0.06;
 var GUARD_STUN = 0.25;                                 // 공중 막기에 튕겨난 건물의 경직 (그 사이 플레이어가 떨어져 연쇄가 끊김)
 var BLOCK_TIME = 0.25;                                 // 막기로 밀어낸 순간의 두 팔 뻗기 자세 시간
-var WAVE_SPEED = 1600, COLLAPSE_TIME = 0.5;            // 필살 충격파 속도, 건물 전체 붕괴 시간
+var WAVE_SPEED = 1000, CAST_TIME = 0.4, COLLAPSE_TIME = 0.5;   // 필살: 용의 속도, 쏘는 동안 제자리에 멈추는 시간, 건물 전체 붕괴 시간
 var CAM_FOLLOW = 380, CAM_LERP = 8, CAM_MARGIN = 60;   // 카메라: 발을 화면 y=380에, 따라가는 빠르기, 화면 끝 여유
 var COMBO_TIME = 1.5, GAUGE_PER_HIT = 1.5, INV_TIME = 2;
+// 그리기 전용: 칼 길이, 베기 궤적(반폭·높이)과 잔상 시간, 칼자국 시간, 용의 길이·마디 수
+var SWORD_LEN = 42, SLASH_RX = 46, SLASH_RY = 22, SLASH_FADE = 0.1, CUT_TIME = 0.12, DRAGON_LEN = 280, DRAGON_SEGS = 16;
 var GRAYS = ['#777', '#999', '#555', '#aaa'];
-// 위험 이벤트: 3동 철거 시 번개, 5동 시 바위, 이후 2동마다 번갈아
+// 위험 이벤트: 3동 격파 시 번개, 5동 시 바위, 이후 2동마다 번갈아
 var EVENT_START = 3, EVENT_EVERY = 2, EVENT_TIME = 10, WARN_TIME = 1.5, STUN_TIME = 1;
-var BOLT_GAP_MIN = 0.45, BOLT_GAP_MAX = 0.8, BOLT_SPEED = 380, BOLT_R = 10;
+var BOLT_GAP_MIN = 0.45, BOLT_GAP_MAX = 0.8, BOLT_WARN = 0.4, BOLT_SPEED = 1500, BOLT_R = 10, BOLT_LEN = 200;   // 번개: 예고 시간, 내리치는 속도, 머리 판정 반지름, 줄기 길이(그리기)
 var ROCK_GAP_MIN = 0.6, ROCK_GAP_MAX = 1.0, ROCK_V0 = 100, ROCK_GRAV = 600, ROCK_R = 14;
 var HAZ_LEVEL_RATE = 0.03, HAZ_SCORE = 50;             // 레벨당 생성 빈도 증가율, 베어낼 때 점수
 
@@ -85,8 +87,8 @@ function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function newGame() {
   G = {
     state: 'play', score: 0, hearts: 3, destroyed: 0, level: 0,
-    combo: 0, comboT: 0, gauge: 0, guard: 100, shake: 0, flash: 0, parts: [], pop: null, overAt: 0, ev: null, haz: [], camY: 0, wave: null, chain: 0,
-    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, rocket: false, attached: false, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0, stun: 0, pierce: 0, block: 0 }
+    combo: 0, comboT: 0, gauge: 0, guard: 100, shake: 0, flash: 0, parts: [], pop: null, overAt: 0, ev: null, haz: [], camY: 0, wave: null, chain: 0, cut: null,
+    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, rocket: false, attached: false, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0, stun: 0, pierce: 0, block: 0, swing: 1, trail: 0, cast: 0 }
   };
   pressed = {};
   spawnBuilding();
@@ -132,13 +134,14 @@ function tryHit() {
   p.attached = false; b.heavy = HEAVY_TIME;              // 연쇄 낙하: 머리 위가 비어 떨어지고, 건물은 더 빨리 쫓아옴
 }
 
-function hitFloor() {                                    // 망치 한 방 (공격·돌파 공통): 콤보·점수·게이지, 맨 아래층 파괴
+function hitFloor() {                                    // 칼 한 번 (베기·돌파 공통): 콤보·점수·게이지, 맨 아래층 파괴
   var p = G.p, b = G.b;
   G.combo++; G.comboT = COMBO_TIME;
   G.score += 10 * G.combo;
   G.gauge = Math.min(100, G.gauge + GAUGE_PER_HIT);
   G.pop = { x: p.x, y: b.y + 10, t: 0.8, n: G.combo };
   debris(p.x, b.y, 6, b.wall, 30);
+  G.cut = { x: p.x, y: b.y - FLOOR_H / 2, d: p.swing, t: CUT_TIME };   // 칼자국 (그리기만)
   b.stun = HIT_STUN - (HIT_STUN - HIT_STUN_MIN) * chainK();   // 경직: 맞은 충격으로 잠깐 멈춤 (연쇄가 길면 짧아짐)
   breakFloor();
 }
@@ -165,14 +168,15 @@ function startEvent() {
 }
 
 function spawnHaz(k) {
-  var b = G.b, bolt = k === 'bolt', r = bolt ? BOLT_R : ROCK_R, x = rand(r, W - r), s = [];
+  var b = G.b, bolt = k === 'bolt', r = bolt ? BOLT_R : ROCK_R, x = rand(r, W - r), s = [], inside = x > b.x && x < b.x + b.w;
   for (var i = 0; i < 8; i++) s.push(rand(0.75, 1.1));   // 바위 모양
-  G.haz.push({ k: k, x: x, y: x > b.x && x < b.x + b.w ? b.y : G.camY - r, vy: bolt ? BOLT_SPEED : ROCK_V0, r: r, s: s });
+  // 번개: warn 동안 예고만 하다가 내리침. b = 예고 중 따라갈 건물(발밑에서 생긴 경우), y0 = 내리치기 시작한 높이
+  G.haz.push({ k: k, x: x, y: inside ? b.y : G.camY - r, vy: bolt ? BOLT_SPEED : ROCK_V0, r: r, s: s, warn: bolt ? BOLT_WARN : 0, b: bolt && inside ? b : null, y0: 0 });
   return (bolt ? rand(BOLT_GAP_MIN, BOLT_GAP_MAX) : rand(ROCK_GAP_MIN, ROCK_GAP_MAX)) / (1 + HAZ_LEVEL_RATE * G.level);
 }
 
-function overlap(h, x1, y1, x2, y2) {                    // 원 vs 사각형
-  var dx = h.x - clamp(h.x, x1, x2), dy = h.y - clamp(h.y, y1, y2);
+function overlap(h, py, x1, y1, x2, y2) {                // 이번 프레임에 py -> h.y로 내려온 원 vs 사각형 (빠른 번개가 뚫고 지나가지 않게)
+  var dx = h.x - clamp(h.x, x1, x2), dy = py > y2 ? py - y2 : h.y < y1 ? y1 - h.y : 0;
   return dx * dx + dy * dy < h.r * h.r;
 }
 
@@ -180,28 +184,38 @@ function updateHaz(dt) {
   var ev = G.ev, p = G.p, hb = p.y - PH;
   if (ev) {
     if (ev.warn > 0) ev.warn -= dt;
-    else if ((ev.t -= dt) <= 0) G.ev = null;            // 끝나도 이미 떨어지는 것은 계속 떨어짐
+    else if ((ev.t -= dt) <= 0) G.ev = null;            // 끝나도 이미 생긴 것은 끝까지 떨어짐
     else if ((ev.next -= dt) <= 0) ev.next = spawnHaz(ev.k);
   }
   for (var i = G.haz.length - 1; i >= 0; i--) {
-    var h = G.haz[i], bolt = h.k === 'bolt', col = bolt ? '#ffe600' : '#8a8a8a';
+    var h = G.haz[i], bolt = h.k === 'bolt', col = bolt ? '#ffe600' : '#8a8a8a', py = h.y;
+    if (h.warn > 0) {                                    // 번개 예고: 충돌 없음, 건물 바닥에서 생겼으면 건물을 따라감
+      h.warn -= dt;
+      if (h.b === G.b) h.y = h.b.y;
+      h.y0 = h.y;
+      continue;
+    }
     if (!bolt) h.vy += ROCK_GRAV * dt;
     h.y += h.vy * dt;
-    if (p.atk > 0 && overlap(h, p.x - 22, hb - ATK_REACH, p.x + 22, hb)) {   // 망치로 베기
-      G.score += HAZ_SCORE; debris(h.x, h.y, 8, col, 16);
-    } else if (p.inv <= 0 && overlap(h, p.x - PW / 2, hb, p.x + PW / 2, p.y)) {
-      if (bolt) { p.stun = STUN_TIME; p.attached = false; p.rocket = false; p.atk = 0; debris(h.x, h.y, 6, col, 10); }
+    if (!bolt) py = h.y;                                 // 바위는 느려서 현재 위치만 검사
+    if (p.atk > 0 && overlap(h, py, p.x - 22, hb - ATK_REACH, p.x + 22, hb)) {   // 칼로 베기
+      G.score += HAZ_SCORE; debris(h.x, clamp(h.y, hb - ATK_REACH, hb), 8, col, 16);
+    } else if (p.inv <= 0 && !p.cast && overlap(h, py, p.x - PW / 2, hb, p.x + PW / 2, p.y)) {
+      if (bolt) { p.stun = STUN_TIME; p.attached = false; p.rocket = false; p.atk = 0; debris(h.x, hb, 6, col, 10); }
       else { hurt(); debris(h.x, h.y, 12, col, 20); }
     } else if (h.y + h.r >= GROUND) {
-      debris(h.x, GROUND - 2, 3, col, 8);
+      debris(h.x, GROUND - 2, bolt ? 10 : 3, col, bolt ? 30 : 8);
+      if (bolt) G.parts.push({ x: h.x, y: GROUND - 14, vx: 0, vy: 0, s: 30, c: '#fff', life: 0.12, max: 0.12 });   // 땅에 꽂히는 섬광
     } else continue;
     G.haz.splice(i, 1);
   }
 }
 
-function special() {                                     // 필살: 위로 날아가는 충격파 (y = 초승달 꼭대기)
+function special() {                                     // 필살: 위로 날아가는 검기의 용 (y = 머리 끝)
+  var p = G.p;
   G.gauge = 0; G.flash = 0.35;
-  G.wave = { x: G.p.x, y: G.p.y - PH - 40 };
+  G.wave = { x: p.x, y: p.y - PH - 40, b: G.b };         // b: 노린 건물 (그 건물이 먼저 사라지면 그냥 날아감)
+  p.cast = CAST_TIME; p.rocket = false; p.attached = false; p.vy = 0; p.atk = 0;   // 시전: 제자리에 멈춰 칼을 치켜듦 (용만 올라감)
 }
 
 function hurt() {
@@ -215,14 +229,15 @@ function update(dt) {
   G.guard = Math.min(100, G.guard + GUARD_REGEN * dt);
   // 플레이어
   p.stun = Math.max(0, p.stun - dt);                     // 감전: 이동·점프·공격·막기·필살 불가
-  p.guard = !!keys.ArrowDown && p.onGround && G.guard >= GUARD_COST && !p.stun;
-  if (!p.guard && !p.stun) {
+  p.cast = Math.max(0, p.cast - dt);                     // 시전: 이동·점프·베기·막기 불가, 중력·번개·바위·깔림 없음
+  p.guard = !!keys.ArrowDown && p.onGround && G.guard >= GUARD_COST && !p.stun && !p.cast;
+  if (!p.guard && !p.stun && !p.cast) {
     var mx = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
     if (mx) p.dir = mx;
     p.x = clamp(p.x + mx * MOVE_SPEED * dt, PW / 2, W - PW / 2);
     if (pressed.ArrowUp && p.onGround) { p.rocket = true; p.onGround = false; p.vy = 0; p.pierce = PIERCE_MAX; }
-    if (pressed.KeyZ && p.cd <= 0) { p.atk = ATK_TIME; p.cd = ATK_COOLDOWN; p.hitDone = false; }
-    if (pressed.KeyX && G.gauge >= 100) special();
+    if (pressed.KeyZ && p.cd <= 0) { p.atk = ATK_TIME; p.cd = ATK_COOLDOWN; p.hitDone = false; p.swing = -p.swing; p.trail = ATK_TIME + SLASH_FADE; }   // swing·trail: 그리기용 (좌우 번갈아 베기, 잔상)
+    if (pressed.KeyX && G.gauge >= 100 && !G.wave) special();
   }
   var under = p.x > b.x && p.x < b.x + b.w;
   if (p.attached && pressed.ArrowDown && G.guard >= GUARD_COST) {  // 공중 막기: 건물을 튕겨내고 떨어짐 (연쇄 낙하도 멈춤)
@@ -233,20 +248,20 @@ function update(dt) {
   if (p.rocket) {
     p.y -= ROCKET_V * dt;
     while (p.rocket && under && p.y - PH <= b.y) {       // 머리가 건물 바닥에 닿음
-      if (p.atk > 0 && p.pierce > 0) {                   // 돌파: 휘두르는 중이면 층을 부수고 계속 솟구침 (휘두름 유지)
-        p.pierce--; p.atk = ATK_TIME; p.hitDone = true; hitFloor();
+      if (p.atk > 0 && p.pierce > 0) {                   // 돌파: 베는 중이면 층을 베고 계속 솟구침 (베기 유지)
+        p.pierce--; p.atk = ATK_TIME; p.hitDone = true; p.swing = -p.swing; p.trail = ATK_TIME + SLASH_FADE; hitFloor();
         b = G.b; under = p.x > b.x && p.x < b.x + b.w;
       } else { p.rocket = false; p.attached = true; }
     }
     if (p.rocket && p.y - PH <= WORLD_TOP + ROCKET_TOP) { p.y = WORLD_TOP + ROCKET_TOP + PH; p.rocket = false; }
   }
-  if (!p.attached && !p.rocket && !p.onGround) {
+  if (!p.attached && !p.rocket && !p.onGround && !p.cast) {
     p.vy += GRAVITY * dt;
     if (under && G.chain > 0) p.vy = Math.min(p.vy, CHAIN_FALL_V);   // 연쇄 낙하 중에는 천천히 떨어져 건물이 따라잡음
     p.y += p.vy * dt;
     if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; G.chain = 0; }
   }
-  p.cd -= dt; p.inv = Math.max(0, p.inv - dt); p.block = Math.max(0, p.block - dt);
+  p.cd -= dt; p.inv = Math.max(0, p.inv - dt); p.block = Math.max(0, p.block - dt); p.trail = Math.max(0, p.trail - dt);
   if (p.atk > 0) { p.atk -= dt; if (!p.hitDone && !p.rocket) tryHit(); }
   // 건물: 경직 중에는 멈춤(속도는 기억). 연쇄 낙하 중에는 가속, 끝나면 기본(등장 중이면 등장) 속도로 돌아감
   b = G.b;
@@ -259,9 +274,9 @@ function update(dt) {
   }
   if (b.y >= ENTER_UNTIL) b.entering = false;
   var w = G.wave;
-  if (w) {                                               // 충격파: 건물 바닥에 닿으면 전체 붕괴 시작, 빗나가면 위로 사라짐
+  if (w) {                                               // 용: 건물 바닥에 닿으면 전체 붕괴 시작, 빗나가면 위로 사라짐
     w.y -= WAVE_SPEED * dt;
-    if (w.x > b.x && w.x < b.x + b.w && w.y <= b.y) {
+    if (w.b === b && w.x > b.x && w.x < b.x + b.w && w.y <= b.y) {
       G.wave = null; b.crate = b.floors.length / COLLAPSE_TIME; p.attached = false;
       G.shake = 0.6; G.flash = 0.35;
     } else if (w.y < WORLD_TOP - 200) G.wave = null;
@@ -272,11 +287,12 @@ function update(dt) {
     b = G.b;
   }
   under = p.x > b.x && p.x < b.x + b.w;
-  if (!p.onGround && !p.rocket && !p.attached && !p.stun && under && b.vy > b.speed && b.y >= p.y - PH && b.y - FLOOR_H <= p.y - PH) {
+  if (!p.onGround && !p.rocket && !p.attached && !p.stun && !p.cast && under && b.vy > b.speed && b.y >= p.y - PH && b.y - FLOOR_H <= p.y - PH) {
     p.attached = true; p.vy = 0;                         // 빠르게 쫓아온 건물이 떨어지는 플레이어 머리에 닿음: 다시 붙음 (감전 중·기본 속도일 땐 아님)
   }
   if (b.y >= HEAD_Y) {
     if (under && p.guard) { G.guard -= GUARD_COST; b.y -= GUARD_PUSH; p.block = BLOCK_TIME; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
+    else if (p.cast > 0) b.y -= AIR_GUARD_PUSH;          // 시전 중에는 깔리지 않고 건물이 조금 밀려남
     else { if (p.inv <= 0) hurt(); b.y -= CRUSH_PUSH; p.attached = false; }
     b.vy = b.speed; b.heavy = 0; G.chain = 0;
   }
@@ -286,6 +302,7 @@ function update(dt) {
   // 콤보, 효과
   if (G.comboT > 0) { G.comboT -= dt; if (G.comboT <= 0) G.combo = 0; }
   if (G.pop) { G.pop.t -= dt; if (G.pop.t <= 0) G.pop = null; }
+  if (G.cut) { G.cut.t -= dt; if (G.cut.t <= 0) G.cut = null; }
   G.shake = Math.max(0, G.shake - dt); G.flash = Math.max(0, G.flash - dt);
   for (var i = G.parts.length - 1; i >= 0; i--) {
     var q = G.parts[i];
@@ -338,41 +355,72 @@ function drawBuilding() {
   ctx.restore();
 }
 
-function drawHammer(px, py, ang) {
+function drawSword(px, py, ang, len) {                   // 손(px,py)에서 ang 방향(0 = 위, 시계 방향)으로 len만큼 뻗은 칼
   ctx.save(); ctx.translate(px, py); ctx.rotate(ang);
-  ctx.fillStyle = '#8b5a2b'; ctx.fillRect(-2, -30, 4, 32);
-  ctx.fillStyle = '#9aa0a6'; ctx.fillRect(-10, -40, 20, 12);
+  ctx.fillStyle = '#2a2026'; ctx.fillRect(-2, 0, 4, 11);                // 자루
+  ctx.fillStyle = '#d4a63a'; ctx.fillRect(-5, -2, 10, 3);               // 코등이
+  ctx.fillStyle = '#eef3f6'; ctx.beginPath();                           // 칼날
+  ctx.moveTo(-1.5, -2); ctx.lineTo(-1.5, 5 - len); ctx.lineTo(1.5, -len); ctx.lineTo(1.5, -2); ctx.fill();
   ctx.restore();
 }
 
-function drawPlayer() {
+function drawArm(x0, y0, x1, y1) {                       // 소매 + 손
+  ctx.strokeStyle = '#4a3a4c'; ctx.lineWidth = 6; ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+  ctx.fillStyle = '#f2c79b'; ctx.beginPath(); ctx.arc(x1, y1, 3, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawPlayer() {                                  // 삿갓 쓴 떠돌이 검객 (발이 p.y, 몸통 높이 PH; 삿갓 꼭지만 조금 더 위)
   var p = G.p;
   if (p.inv > 0 && Math.floor(p.inv * 12) % 2) return;
-  var c = p.guard ? 8 : 0, d = p.dir;
+  var guard = p.guard || p.block > 0, slash = p.atk > 0 || p.trail > 0, c = p.guard ? 8 : 0, d = p.dir, s = p.swing;
   ctx.save(); ctx.translate(p.x, p.y);
-  ctx.fillStyle = '#2b3a67'; ctx.fillRect(-14, -18, 11, 18); ctx.fillRect(3, -18, 11, 18);
-  ctx.fillStyle = '#f28c28'; ctx.fillRect(-16, -42 + c, 32, 26);
-  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillRect(-16, -31 + c, 32, 4);
-  ctx.fillStyle = '#f2c79b'; ctx.beginPath(); ctx.arc(0, -48 + c, 8, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#ffd400'; ctx.beginPath(); ctx.arc(0, -51 + c, 10, Math.PI, 0); ctx.fill();
-  ctx.fillRect(-13, -52 + c, 26, 3);
-  if (p.guard || p.block > 0) {                          // 막기: 두 팔을 위로 (밀어낸 순간에는 쭉 뻗고 손끝에 섬광), 망치는 등에
-    var top = p.block > 0 ? -PH - 22 : -PH - 8;
-    drawHammer(-d * 12, -20 + c, -d * 0.5);
-    ctx.fillStyle = '#f2c79b';
-    ctx.fillRect(-15, top, 6, -38 + c - top); ctx.fillRect(9, top, 6, -38 + c - top);
-    ctx.fillRect(-18, top - 5, 12, 6); ctx.fillRect(6, top - 5, 12, 6);
+  ctx.save(); ctx.translate(d * 7, -27 + c); ctx.rotate(-d * 2.1);     // 허리의 칼집 (뒤로 비스듬히), 쉬는 동안에는 칼자루가 꽂혀 있음
+  ctx.fillStyle = '#17141a'; ctx.fillRect(-2.5, -36, 5, 36);
+  if (!guard && !slash && !p.cast) { ctx.fillStyle = '#2a2026'; ctx.fillRect(-2, 0, 4, 11); ctx.fillStyle = '#d4a63a'; ctx.fillRect(-5, -1, 10, 3); }
+  ctx.restore();
+  ctx.fillStyle = '#2b2622'; ctx.fillRect(-11, -16, 9, 14); ctx.fillRect(2, -16, 9, 14);     // 바지
+  ctx.fillStyle = '#c9a25a'; ctx.fillRect(-12, -3, 11, 3); ctx.fillRect(1, -3, 11, 3);       // 짚신
+  ctx.fillStyle = '#3a2c3c'; ctx.beginPath();                                                // 도포 (아래로 퍼짐)
+  ctx.moveTo(-12, -42 + c); ctx.lineTo(12, -42 + c); ctx.lineTo(17, -13); ctx.lineTo(-17, -13); ctx.fill();
+  ctx.strokeStyle = '#e6dcc4'; ctx.lineWidth = 2; ctx.beginPath();                           // 깃
+  ctx.moveTo(-6, -42 + c); ctx.lineTo(1, -31 + c); ctx.lineTo(7, -42 + c); ctx.stroke();
+  ctx.fillStyle = '#b3372c'; ctx.fillRect(-15, -29 + c, 30, 5);                              // 허리띠와 나부끼는 끝
+  ctx.fillRect(-d * 13 - 2, -26 + c, 4, 11 + Math.sin(clock * 9) * 2);
+  ctx.fillStyle = '#f2c79b'; ctx.beginPath(); ctx.arc(0, -46 + c, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#d8b464'; ctx.beginPath();                                                // 삿갓 (얼굴 위쪽을 가림)
+  ctx.moveTo(-23, -47 + c); ctx.lineTo(0, -64 + c); ctx.lineTo(23, -47 + c); ctx.fill();
+  ctx.strokeStyle = '#9c7a35'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.moveTo(-23, -47 + c); ctx.lineTo(23, -47 + c); ctx.moveTo(-9, -47 + c); ctx.lineTo(0, -64 + c); ctx.lineTo(9, -47 + c); ctx.stroke();
+  if (p.cast > 0) {                                      // 필살 시전: 칼을 곧게 치켜들고 칼끝에서 빛이 터짐
+    var ce = 1 - p.cast / CAST_TIME;
+    drawArm(-10, -39, -3, -PH - 6); drawArm(10, -39, 3, -PH - 6);
+    drawSword(0, -PH - 9, 0, SWORD_LEN);
+    ctx.fillStyle = 'rgba(190,245,255,' + (1 - ce) * 0.8 + ')'; ctx.beginPath(); ctx.arc(0, -PH - 9 - SWORD_LEN, 10 + ce * 34, 0, Math.PI * 2); ctx.fill();
+  } else if (guard) {                                    // 막기: 두 손으로 칼을 머리 위에 가로로 (밀어낸 순간에는 더 높이 + 섬광)
+    var top = p.block > 0 ? -PH - 26 : -PH - 12;
+    drawArm(-10, -39 + c, -d * 15, top + 3); drawArm(10, -39 + c, d * 10, top + 3);
+    drawSword(-d * 16, top, d * Math.PI / 2, SWORD_LEN);
     if (p.block > 0) {
-      ctx.strokeStyle = 'rgba(255,255,255,' + (p.block / BLOCK_TIME) + ')'; ctx.lineWidth = 4; ctx.beginPath();
-      ctx.arc(0, top + 16, 30, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
+      var e = 1 - p.block / BLOCK_TIME;
+      ctx.strokeStyle = 'rgba(255,255,255,' + (1 - e) + ')'; ctx.lineWidth = 4; ctx.beginPath();
+      ctx.arc(0, top + 24, 30, -Math.PI * 0.85, -Math.PI * 0.15);
+      ctx.moveTo(-14, top - 8 - e * 4); ctx.lineTo(-22 - e * 10, top - 16 - e * 10);
+      ctx.moveTo(0, top - 10 - e * 4); ctx.lineTo(0, top - 20 - e * 14);
+      ctx.moveTo(14, top - 8 - e * 4); ctx.lineTo(22 + e * 10, top - 16 - e * 10); ctx.stroke();
     }
-  } else if (p.atk > 0) {
-    var t = 1 - p.atk / ATK_TIME;
-    drawHammer(d * 10, -36, d * 1.5 * (1 - t));
-    ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3; ctx.beginPath();
-    ctx.arc(d * 10, -36, 42, -Math.PI / 2 - 0.3, -Math.PI / 2 + 0.3); ctx.stroke();
+  } else if (slash) {                                    // 베기: 머리 위를 가로로 긋는 칼 (s = 이번 방향) + 초승달 궤적, 끝난 뒤 잠깐 잔상
+    var t = p.atk > 0 ? 1 - p.atk / ATK_TIME : 1, a0 = s > 0 ? Math.PI : 2 * Math.PI, a1 = a0 + s * Math.PI * t;
+    var hy = -PH - 10, al = Math.min(1, p.trail / SLASH_FADE);
+    ctx.fillStyle = 'rgba(150,230,255,' + al * 0.4 + ')'; ctx.beginPath();
+    ctx.ellipse(0, hy, SLASH_RX + 6, SLASH_RY + 8, 0, a0, a1, s < 0); ctx.ellipse(0, hy, SLASH_RX - 6, SLASH_RY - 12, 0, a1, a0, s > 0); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,' + al + ')'; ctx.beginPath();
+    ctx.ellipse(0, hy, SLASH_RX + 2, SLASH_RY + 3, 0, a0, a1, s < 0); ctx.ellipse(0, hy, SLASH_RX - 3, SLASH_RY - 6, 0, a1, a0, s > 0); ctx.fill();
+    var tx = Math.cos(a1) * SLASH_RX, ty = Math.sin(a1) * SLASH_RY;
+    drawArm(-10, -39, -3, hy + 3); drawArm(10, -39, 3, hy + 3);
+    if (p.atk > 0) drawSword(0, hy, Math.atan2(tx, -ty), Math.sqrt(tx * tx + ty * ty));
+    else drawSword(0, hy, s * 1.9, SWORD_LEN * 0.8);       // 다 벤 뒤: 칼끝을 내린 자세
   } else {
-    drawHammer(d * 14, -30, d * 2.4);
+    drawArm(-12, -39, -14, -23); drawArm(12, -39, 14, -23);
   }
   if (p.stun > 0 && Math.floor(clock * 16) % 2) { ctx.fillStyle = 'rgba(255,230,0,0.55)'; ctx.fillRect(-18, -PH - 4, 36, PH + 4); }
   ctx.restore();
@@ -381,15 +429,27 @@ function drawPlayer() {
 
 function drawHaz() {
   for (var i = 0; i < G.haz.length; i++) {
-    var h = G.haz[i], x = h.x, y = h.y;
+    var h = G.haz[i], x = h.x, y = h.y, k;
     ctx.beginPath();
-    if (h.k === 'bolt') {                                // 빛나는 구슬 + 지그재그 번개
-      ctx.fillStyle = 'rgba(255,230,0,0.35)'; ctx.arc(x, y, h.r + 6, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#fff59d'; ctx.beginPath(); ctx.arc(x, y, h.r * 0.6, 0, Math.PI * 2); ctx.fill();
-      ctx.strokeStyle = '#ffe600'; ctx.lineWidth = 3; ctx.beginPath();
-      ctx.moveTo(x + 4, y - 26); ctx.lineTo(x - 5, y - 14); ctx.lineTo(x + 4, y - 8); ctx.lineTo(x - 2, y + 4); ctx.stroke();
+    if (h.k === 'bolt' && h.warn > 0) {                  // 번개 예고: 땅까지 깜빡이는 가는 선 + 시작점의 불꽃
+      ctx.moveTo(x, y); ctx.lineTo(x, GROUND);
+      ctx.strokeStyle = 'rgba(255,240,120,0.1)'; ctx.lineWidth = 9; ctx.stroke();
+      ctx.strokeStyle = 'rgba(255,245,170,' + rand(0.15, 0.6) + ')'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.beginPath();
+      for (k = 0; k < 3; k++) { ctx.moveTo(x + rand(-5, 5), y + rand(0, 8)); ctx.lineTo(x + rand(-16, 16), y + rand(4, 26)); }
+      ctx.strokeStyle = '#fff59d'; ctx.stroke();
+    } else if (h.k === 'bolt') {                         // 내리치는 번개: 매 프레임 새로 꺾이는 긴 줄기 (파란 빛 > 노랑 > 흰 속) + 밝은 머리
+      var top = Math.max(y - BOLT_LEN, h.y0);
+      ctx.moveTo(x, y);
+      for (k = y - 22; k > top; k -= 22) ctx.lineTo(x + rand(-10, 10), k);
+      ctx.lineTo(x + rand(-6, 6), top);
+      ctx.lineJoin = 'miter';
+      ctx.strokeStyle = 'rgba(120,180,255,0.4)'; ctx.lineWidth = 11; ctx.stroke();
+      ctx.strokeStyle = '#ffe600'; ctx.lineWidth = 5; ctx.stroke();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(x, y, h.r * 0.7, 0, Math.PI * 2); ctx.fill();
     } else {                                             // 울퉁불퉁한 회색 바위
-      for (var k = 0; k < 8; k++) {
+      for (k = 0; k < 8; k++) {
         var a = k * Math.PI / 4, rr = h.r * h.s[k];
         ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
       }
@@ -399,15 +459,46 @@ function drawHaz() {
   }
 }
 
-function drawWave() {                                    // 필살 충격파: 위로 볼록한 밝은 초승달
-  var w = G.wave;
+function drawCut() {                                     // 베인 층에 남는 가는 칼자국 (아주 잠깐)
+  var q = G.cut;
+  if (!q) return;
+  var a = q.t / CUT_TIME;
+  ctx.strokeStyle = 'rgba(150,230,255,' + a * 0.5 + ')'; ctx.lineWidth = 7; ctx.beginPath();
+  ctx.moveTo(q.x - 110, q.y + q.d * 9); ctx.lineTo(q.x + 110, q.y - q.d * 9); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,' + a + ')'; ctx.lineWidth = 2; ctx.beginPath();
+  ctx.moveTo(q.x - 110, q.y + q.d * 9); ctx.lineTo(q.x + 110, q.y - q.d * 9); ctx.stroke();
+}
+
+function drawDragon() {                                  // 필살: 검기로 된 큰 용 (주둥이 끝이 wave.y, 몸통은 아래로 구불구불 따라옴)
+  var w = G.wave, i, k, x, y, pass;
   if (!w) return;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(255,214,0,0.55)'; ctx.lineWidth = 20;
-  ctx.beginPath(); ctx.arc(w.x, w.y + 80, 80, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
-  ctx.strokeStyle = '#fff'; ctx.lineWidth = 7;
-  ctx.beginPath(); ctx.arc(w.x, w.y + 80, 80, -Math.PI * 0.8, -Math.PI * 0.2); ctx.stroke();
-  ctx.lineCap = 'butt';
+  var lim = G.p.y - PH - 12;                             // 막 쏜 직후: 칼끝 아래로는 그리지 않음 (검에서 솟아 나오는 모양)
+  if (w.y + DRAGON_LEN < lim) { ctx.fillStyle = 'rgba(120,220,255,0.14)'; ctx.fillRect(w.x - 14, w.y + DRAGON_LEN, 28, Math.min(130, lim - w.y - DRAGON_LEN)); }   // 꼬리 뒤 잔광
+  for (pass = 0; pass < 2; pass++) {                     // 몸통: 바깥 빛 -> 밝은 속 (꼬리로 갈수록 가늘고 크게 흔들림)
+    ctx.fillStyle = pass ? '#eaffff' : 'rgba(90,210,255,0.4)';
+    for (i = DRAGON_SEGS - 1; i >= 0; i--) {
+      k = i / DRAGON_SEGS; x = w.x + Math.sin(clock * 14 - i * 0.6) * 30 * k; y = w.y + 30 + k * DRAGON_LEN;
+      if (y > lim) continue;
+      ctx.beginPath(); ctx.arc(x, y, 24 - 17 * k + (pass ? 0 : 10), 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  ctx.fillStyle = '#ffd35a';                             // 금빛 등비늘
+  for (i = 1; i < DRAGON_SEGS; i += 2) {
+    k = i / DRAGON_SEGS; x = w.x + Math.sin(clock * 14 - i * 0.6) * 30 * k; y = w.y + 30 + k * DRAGON_LEN;
+    if (y > lim) continue;
+    ctx.beginPath(); ctx.arc(x, y, 7 - 4.5 * k, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.save(); ctx.translate(w.x, w.y); ctx.scale(1.6, 1.6);   // 머리 (폭 약 45px): 빛, 뿔, 수염, 주둥이, 입, 눈
+  ctx.fillStyle = 'rgba(90,210,255,0.4)'; ctx.beginPath(); ctx.arc(0, 18, 26, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = '#ffd35a'; ctx.lineWidth = 4; ctx.beginPath();
+  ctx.moveTo(-8, 22); ctx.lineTo(-20, 44); ctx.moveTo(8, 22); ctx.lineTo(20, 44); ctx.stroke();
+  ctx.strokeStyle = '#bff3ff'; ctx.lineWidth = 2; ctx.beginPath(); k = Math.sin(clock * 12) * 4;
+  ctx.moveTo(-7, 8); ctx.lineTo(-24, 16 + k); ctx.moveTo(7, 8); ctx.lineTo(24, 16 - k); ctx.stroke();
+  ctx.fillStyle = '#eaffff'; ctx.beginPath();
+  ctx.moveTo(0, 0); ctx.lineTo(9, 10); ctx.lineTo(14, 24); ctx.lineTo(9, 33); ctx.lineTo(-9, 33); ctx.lineTo(-14, 24); ctx.lineTo(-9, 10); ctx.fill();
+  ctx.strokeStyle = '#2a7fa8'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(-6, 11); ctx.lineTo(0, 6); ctx.lineTo(6, 11); ctx.stroke();
+  ctx.fillStyle = '#ffb300'; ctx.beginPath(); ctx.arc(-7, 22, 2.5, 0, Math.PI * 2); ctx.arc(7, 22, 2.5, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
 }
 
 function drawParts() {
@@ -443,7 +534,7 @@ function drawHud() {
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(ax, gy, 120, 16);
   outlined('방어', ax + 130, gy + 8, 16, ok ? '#fff' : '#aaa', 'left');
   outlined('SCORE ' + String(G.score).padStart(7, '0'), scoreX, y + 6, 22, '#fff', 'right');
-  outlined('철거 ' + G.destroyed + '동', scoreX, y + 30, 16, '#ffd400', 'right');
+  outlined(G.destroyed + '동 격파', scoreX, y + 30, 16, '#ffd400', 'right');
 }
 
 function overlay(lines) {
@@ -457,7 +548,7 @@ function draw() {
   drawBg(G.camY || 0);
   if (G.state !== 'title') {
     ctx.translate(0, -G.camY);                           // 여기부터 세계 좌표 (카메라만큼 올려 그림)
-    drawBuilding(); drawHaz(); drawWave(); drawPlayer(); drawParts();
+    drawBuilding(); drawCut(); drawHaz(); drawDragon(); drawPlayer(); drawParts();
     if (G.pop && G.pop.n >= 2) {
       var t = G.pop.t, size = 40 + Math.max(0, t - 0.6) * 80;
       ctx.globalAlpha = Math.min(1, t / 0.3);
@@ -470,9 +561,9 @@ function draw() {
   if (G.flash > 0) { ctx.fillStyle = 'rgba(255,255,255,' + (G.flash / 0.35) + ')'; ctx.fillRect(0, 0, W, H); }
   var blink = Math.floor(clock * 2) % 2 === 0 ? '#ffd400' : '#fff';
   if (G.state === 'title') {
-    overlay([['철거반장', 110, 80, '#ffd400'], ['하늘에서 내려오는 건물을 망치로 부숴라!', 175, 22],
-      ['← → 이동    ↑ 로켓 점프 (휘두르며 닿으면 돌파)    ↓ 막기 (공중: 튕겨내기)', 250, 20],
-      ['Z 망치 (붙어서 치면 연쇄 낙하)    X 필살 충격파 (게이지 가득)    P 일시정지', 285, 20],
+    overlay([['하늘베기', 110, 80, '#ffd400'], ['하늘에서 내려오는 건물을 베어라!', 175, 22],
+      ['← → 이동    ↑ 로켓 점프 (베면서 닿으면 돌파)    ↓ 막기 (공중: 튕겨내기)', 250, 20],
+      ['Z 베기 (붙어서 베면 연쇄 낙하)    X 필살기 (게이지 가득)    P 일시정지', 285, 20],
       [TOUCH ? '화면을 터치하거나 Enter / Space로 시작' : 'Enter 또는 Space로 시작', 390, 26, blink]]);
     return;
   }
@@ -482,7 +573,7 @@ function draw() {
     Math.floor(clock * 6) % 2 ? '#ffd400' : '#fff');
   if (G.state === 'pause') overlay([['일시정지', 230, 56], [TOUCH ? 'II 버튼 또는 P로 계속' : 'P로 계속', 300, 22]]);
   if (G.state === 'over') overlay([['게임 오버', 190, 64, '#e63946'], ['점수 ' + String(G.score).padStart(7, '0'), 270, 30],
-    ['철거한 건물 ' + G.destroyed + '동', 315, 22], [TOUCH ? '터치 또는 R로 다시 시작' : 'R로 다시 시작', 380, 24, blink]]);
+    ['격파한 건물 ' + G.destroyed + '동', 315, 22], [TOUCH ? '터치 또는 R로 다시 시작' : 'R로 다시 시작', 380, 24, blink]]);
 }
 
 // ---- 입력 ----
