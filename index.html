@@ -44,14 +44,27 @@
 <script>
 'use strict';
 // ---- 튜닝 값 ----
-var W = 960, H = 540, GROUND = 480, FLOOR_H = 48;
+var W = 960, H = 540, GROUND = 480, FLOOR_H = 32;
+var WORLD_TOP = -3000;                                 // 세계 맨 위 (카메라 한계, 새 건물 등장 위치)
 var PW = 36, PH = 56, HEAD_Y = GROUND - PH;          // HEAD_Y: 깔림 판정선
-var GRAVITY = 1500, JUMP_V = 580, MOVE_SPEED = 280;
-var ATK_TIME = 0.12, ATK_COOLDOWN = 0.2, ATK_REACH = 46, ATK_DAMAGE = 1;
-var HIT_NUDGE = 3, GUARD_PUSH = 90, CRUSH_PUSH = 220;
-var ENTER_SPEED = 150, ENTER_UNTIL = 200;              // 등장 시 빠르게 내려오는 구간
-var COMBO_TIME = 1.5, GAUGE_PER_HIT = 4, INV_TIME = 2;
+var GRAVITY = 1500, MOVE_SPEED = 280;
+var ROCKET_V = 1100, ROCKET_TOP = 40, PIERCE_MAX = 4;  // ↑: 중력 없이 솟구침 (건물 밖이면 WORLD_TOP+ROCKET_TOP까지), 휘두르며 닿으면 최대 4층 돌파
+var ATK_TIME = 0.12, ATK_COOLDOWN = 0.2, ATK_REACH = 46;
+var GUARD_PUSH = 90, AIR_GUARD_PUSH = 50, CRUSH_PUSH = 220;
+var GUARD_COST = 25, GUARD_REGEN = 6;                  // 방어 게이지: 1회 소모량, 초당 회복량
+var FLOORS_BASE = 50, FLOORS_LEVEL = 10;               // 층수 = 50 + 10*레벨 (한 방에 한 층)
+var ENTER_SPEED = 400, ENTER_UNTIL = GROUND - 1.5 * H; // 등장: 바닥이 지면 위 1.5화면에 올 때까지 빠르게
+var B_BASE = 30, B_LEVEL = 4;                          // 기본 하강 속도 = 30 + 4*레벨
+var B_GRAV = 2400, B_VMAX = 700, HEAVY_TIME = 0.6, B_EASE = 2000;  // 연쇄 낙하: 가속, 최고 속도, 지속 시간, 끝난 뒤 감속
+var WAVE_SPEED = 1600, COLLAPSE_TIME = 0.5;            // 필살 충격파 속도, 건물 전체 붕괴 시간
+var CAM_FOLLOW = 380, CAM_LERP = 8, CAM_MARGIN = 60;   // 카메라: 발을 화면 y=380에, 따라가는 빠르기, 화면 끝 여유
+var COMBO_TIME = 1.5, GAUGE_PER_HIT = 1.5, INV_TIME = 2;
 var GRAYS = ['#777', '#999', '#555', '#aaa'];
+// 위험 이벤트: 3동 철거 시 번개, 5동 시 바위, 이후 2동마다 번갈아
+var EVENT_START = 3, EVENT_EVERY = 2, EVENT_TIME = 10, WARN_TIME = 1.5, STUN_TIME = 1;
+var BOLT_GAP_MIN = 0.45, BOLT_GAP_MAX = 0.8, BOLT_SPEED = 380, BOLT_R = 10;
+var ROCK_GAP_MIN = 0.6, ROCK_GAP_MAX = 1.0, ROCK_V0 = 100, ROCK_GRAV = 600, ROCK_R = 14;
+var HAZ_LEVEL_RATE = 0.03, HAZ_SCORE = 50;             // 레벨당 생성 빈도 증가율, 베어낼 때 점수
 
 var canvas = document.getElementById('game');
 var ctx = canvas.getContext('2d');
@@ -67,25 +80,24 @@ function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function newGame() {
   G = {
     state: 'play', score: 0, hearts: 3, destroyed: 0, level: 0,
-    combo: 0, comboT: 0, gauge: 0, shake: 0, flash: 0, parts: [], pop: null, overAt: 0,
-    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0 }
+    combo: 0, comboT: 0, gauge: 0, guard: 100, shake: 0, flash: 0, parts: [], pop: null, overAt: 0, ev: null, haz: [], camY: 0, wave: null,
+    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, rocket: false, attached: false, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0, stun: 0, pierce: 0 }
   };
   pressed = {};
   spawnBuilding();
 }
 
 function spawnBuilding() {
-  var lv = G.level, n = 3 + lv, hp = 3 + lv, cols = 6 + Math.floor(rand(0, 7));
+  var lv = G.level, n = FLOORS_BASE + FLOORS_LEVEL * lv, cols = 6 + Math.floor(rand(0, 7));
   var w = Math.round(W * rand(0.75, 0.85)), hue = Math.floor(rand(0, 360)), floors = [];
   for (var i = 0; i < n; i++) {
-    var lit = [], cracks = [];
+    var lit = [];                                        // 층 = 창문 불빛 목록 (한 방에 부서지므로 체력 없음)
     for (var c = 0; c < cols; c++) lit.push(Math.random() < 0.35);
-    for (var k = 0; k < 4; k++) cracks.push(rand(0.05, 0.95));
-    floors.push({ hp: hp, max: hp, lit: lit, cracks: cracks });
+    floors.push(lit);
   }
   G.b = {
-    x: (W - w) / 2, w: w, y: 0, floors: floors, cols: cols, entering: true,
-    speed: 30 + 5 * lv, antenna: Math.random() < 0.5,
+    x: (W - w) / 2, w: w, y: WORLD_TOP, vy: ENTER_SPEED, heavy: 0, crate: 0, cq: 0, floors: floors, cols: cols, entering: true,
+    speed: B_BASE + B_LEVEL * lv, antenna: Math.random() < 0.5,
     wall: 'hsl(' + hue + ',' + Math.round(rand(15, 45)) + '%,' + Math.round(rand(38, 58)) + '%)',
     roof: 'hsl(' + hue + ',20%,28%)', glass: 'hsl(' + Math.round(rand(190, 230)) + ',35%,25%)'
   };
@@ -106,15 +118,19 @@ function tryHit() {
   var p = G.p, b = G.b, hb = p.y - PH, ht = hb - ATK_REACH;
   if (p.x + 22 < b.x || p.x - 22 > b.x + b.w || b.y < ht || b.y - FLOOR_H > hb) return;
   p.hitDone = true;
-  var f = b.floors[0];
-  f.hp -= ATK_DAMAGE;
-  b.y -= HIT_NUDGE;
+  hitFloor();
+  if (p.onGround || G.b !== b) return;
+  p.attached = false; b.heavy = HEAVY_TIME;              // 연쇄 낙하: 머리 위가 비어 떨어지고, 건물은 더 빨리 쫓아옴
+}
+
+function hitFloor() {                                    // 망치 한 방 (공격·돌파 공통): 콤보·점수·게이지, 맨 아래층 파괴
+  var p = G.p, b = G.b;
   G.combo++; G.comboT = COMBO_TIME;
   G.score += 10 * G.combo;
   G.gauge = Math.min(100, G.gauge + GAUGE_PER_HIT);
   G.pop = { x: p.x, y: b.y + 10, t: 0.8, n: G.combo };
   debris(p.x, b.y, 6, b.wall, 30);
-  if (f.hp <= 0) breakFloor();
+  breakFloor();
 }
 
 function breakFloor() {
@@ -126,15 +142,56 @@ function breakFloor() {
   G.shake = Math.max(G.shake, 0.25);
   if (!b.floors.length) {
     G.destroyed++; G.score += 1000 + 500 * G.level; G.level++;
-    G.shake = 0.5;
-    spawnBuilding();
+    G.shake = 0.5; G.p.attached = false;                // 붙어 있던 건물이 사라지면 떨어짐
+    spawnBuilding(); startEvent();
   }
 }
 
-function special() {
+// ---- 위험 이벤트 (번개 / 바위) ----
+function startEvent() {
+  var d = G.destroyed - EVENT_START;
+  if (d < 0 || d % EVENT_EVERY || G.ev) return;          // 진행 중이면 이번 차례는 건너뜀
+  G.ev = { k: (d / EVENT_EVERY) % 2 ? 'rock' : 'bolt', warn: WARN_TIME, t: EVENT_TIME, next: 0 };
+}
+
+function spawnHaz(k) {
+  var b = G.b, bolt = k === 'bolt', r = bolt ? BOLT_R : ROCK_R, x = rand(r, W - r), s = [];
+  for (var i = 0; i < 8; i++) s.push(rand(0.75, 1.1));   // 바위 모양
+  G.haz.push({ k: k, x: x, y: x > b.x && x < b.x + b.w ? b.y : G.camY - r, vy: bolt ? BOLT_SPEED : ROCK_V0, r: r, s: s });
+  return (bolt ? rand(BOLT_GAP_MIN, BOLT_GAP_MAX) : rand(ROCK_GAP_MIN, ROCK_GAP_MAX)) / (1 + HAZ_LEVEL_RATE * G.level);
+}
+
+function overlap(h, x1, y1, x2, y2) {                    // 원 vs 사각형
+  var dx = h.x - clamp(h.x, x1, x2), dy = h.y - clamp(h.y, y1, y2);
+  return dx * dx + dy * dy < h.r * h.r;
+}
+
+function updateHaz(dt) {
+  var ev = G.ev, p = G.p, hb = p.y - PH;
+  if (ev) {
+    if (ev.warn > 0) ev.warn -= dt;
+    else if ((ev.t -= dt) <= 0) G.ev = null;            // 끝나도 이미 떨어지는 것은 계속 떨어짐
+    else if ((ev.next -= dt) <= 0) ev.next = spawnHaz(ev.k);
+  }
+  for (var i = G.haz.length - 1; i >= 0; i--) {
+    var h = G.haz[i], bolt = h.k === 'bolt', col = bolt ? '#ffe600' : '#8a8a8a';
+    if (!bolt) h.vy += ROCK_GRAV * dt;
+    h.y += h.vy * dt;
+    if (p.atk > 0 && overlap(h, p.x - 22, hb - ATK_REACH, p.x + 22, hb)) {   // 망치로 베기
+      G.score += HAZ_SCORE; debris(h.x, h.y, 8, col, 16);
+    } else if (p.inv <= 0 && overlap(h, p.x - PW / 2, hb, p.x + PW / 2, p.y)) {
+      if (bolt) { p.stun = STUN_TIME; p.attached = false; p.rocket = false; p.atk = 0; debris(h.x, h.y, 6, col, 10); }
+      else { hurt(); debris(h.x, h.y, 12, col, 20); }
+    } else if (h.y + h.r >= GROUND) {
+      debris(h.x, GROUND - 2, 3, col, 8);
+    } else continue;
+    G.haz.splice(i, 1);
+  }
+}
+
+function special() {                                     // 필살: 위로 날아가는 충격파 (y = 초승달 꼭대기)
   G.gauge = 0; G.flash = 0.35;
-  var n = Math.min(2, G.b.floors.length);
-  for (var i = 0; i < n; i++) breakFloor();
+  G.wave = { x: G.p.x, y: G.p.y - PH - 40 };
 }
 
 function hurt() {
@@ -145,33 +202,72 @@ function hurt() {
 function update(dt) {
   if (G.state !== 'play') { pressed = {}; return; }
   var p = G.p, b = G.b;
+  G.guard = Math.min(100, G.guard + GUARD_REGEN * dt);
   // 플레이어
-  p.guard = !!keys.ArrowDown && p.onGround;
-  if (!p.guard) {
+  p.stun = Math.max(0, p.stun - dt);                     // 감전: 이동·점프·공격·막기·필살 불가
+  p.guard = !!keys.ArrowDown && p.onGround && G.guard >= GUARD_COST && !p.stun;
+  if (!p.guard && !p.stun) {
     var mx = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
     if (mx) p.dir = mx;
     p.x = clamp(p.x + mx * MOVE_SPEED * dt, PW / 2, W - PW / 2);
-    if (pressed.ArrowUp && p.onGround) { p.vy = -JUMP_V; p.onGround = false; }
+    if (pressed.ArrowUp && p.onGround) { p.rocket = true; p.onGround = false; p.vy = 0; p.pierce = PIERCE_MAX; }
     if (pressed.KeyZ && p.cd <= 0) { p.atk = ATK_TIME; p.cd = ATK_COOLDOWN; p.hitDone = false; }
     if (pressed.KeyX && G.gauge >= 100) special();
   }
-  b = G.b;
-  p.vy += GRAVITY * dt; p.y += p.vy * dt;
-  if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; }
   var under = p.x > b.x && p.x < b.x + b.w;
-  if (under && p.vy < 0 && p.y - PH < b.y) { p.y = b.y + PH; p.vy = 0; } // 건물 바닥에 머리 쿵
-  p.cd -= dt; p.inv = Math.max(0, p.inv - dt);
-  if (p.atk > 0) { p.atk -= dt; if (!p.hitDone) tryHit(); }
-  // 건물
-  b = G.b;
-  b.y += (b.entering ? ENTER_SPEED : b.speed) * dt;
-  if (b.y >= ENTER_UNTIL) b.entering = false;
-  if (b.y >= HEAD_Y) {
-    under = p.x > b.x && p.x < b.x + b.w;
-    if (under && p.guard) { b.y -= GUARD_PUSH; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
-    else { if (p.inv <= 0) hurt(); b.y -= CRUSH_PUSH; }
-    b.y = Math.max(60, b.y);
+  if (p.attached && pressed.ArrowDown && G.guard >= GUARD_COST) {  // 공중 막기: 건물을 튕겨내고 떨어짐 (연쇄 낙하도 멈춤)
+    G.guard -= GUARD_COST; b.y -= AIR_GUARD_PUSH; b.vy = b.speed; b.heavy = 0; p.attached = false;
+    G.shake = Math.max(G.shake, 0.1); debris(p.x, b.y, 8, '#fff', 30);
   }
+  if (p.attached && !under) p.attached = false;          // 건물 밖으로 나가면 떨어짐
+  if (p.rocket) {
+    p.y -= ROCKET_V * dt;
+    while (p.rocket && under && p.y - PH <= b.y) {       // 머리가 건물 바닥에 닿음
+      if (p.atk > 0 && p.pierce > 0) {                   // 돌파: 휘두르는 중이면 층을 부수고 계속 솟구침 (휘두름 유지)
+        p.pierce--; p.atk = ATK_TIME; p.hitDone = true; hitFloor();
+        b = G.b; under = p.x > b.x && p.x < b.x + b.w;
+      } else { p.rocket = false; p.attached = true; }
+    }
+    if (p.rocket && p.y - PH <= WORLD_TOP + ROCKET_TOP) { p.y = WORLD_TOP + ROCKET_TOP + PH; p.rocket = false; }
+  }
+  if (!p.attached && !p.rocket && !p.onGround) {
+    p.vy += GRAVITY * dt; p.y += p.vy * dt;
+    if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; }
+  }
+  p.cd -= dt; p.inv = Math.max(0, p.inv - dt);
+  if (p.atk > 0) { p.atk -= dt; if (!p.hitDone && !p.rocket) tryHit(); }
+  // 건물: 연쇄 낙하 중에는 가속, 끝나면 기본(등장 중이면 등장) 속도로 돌아감
+  b = G.b;
+  var base = b.entering ? ENTER_SPEED : b.speed;
+  if (b.heavy > 0) { b.heavy -= dt; b.vy = Math.min(B_VMAX, b.vy + B_GRAV * dt); }
+  else b.vy = Math.max(base, b.vy - B_EASE * dt);
+  b.y += b.vy * dt;
+  if (b.y >= ENTER_UNTIL) b.entering = false;
+  var w = G.wave;
+  if (w) {                                               // 충격파: 건물 바닥에 닿으면 전체 붕괴 시작, 빗나가면 위로 사라짐
+    w.y -= WAVE_SPEED * dt;
+    if (w.x > b.x && w.x < b.x + b.w && w.y <= b.y) {
+      G.wave = null; b.crate = b.floors.length / COLLAPSE_TIME; p.attached = false;
+      G.shake = 0.6; G.flash = 0.35;
+    } else if (w.y < WORLD_TOP - 200) G.wave = null;
+  }
+  if (b.crate) {                                         // 아래층부터 연달아 무너짐 (초당 crate층)
+    b.cq += b.crate * dt;
+    while (b.cq >= 1 && G.b === b) { b.cq--; breakFloor(); }
+    b = G.b;
+  }
+  under = p.x > b.x && p.x < b.x + b.w;
+  if (!p.onGround && !p.rocket && !p.attached && !p.stun && under && b.vy > b.speed && b.y >= p.y - PH && b.y - FLOOR_H <= p.y - PH) {
+    p.attached = true; p.vy = 0;                         // 빠르게 쫓아온 건물이 떨어지는 플레이어 머리에 닿음: 다시 붙음 (감전 중·기본 속도일 땐 아님)
+  }
+  if (b.y >= HEAD_Y) {
+    if (under && p.guard) { G.guard -= GUARD_COST; b.y -= GUARD_PUSH; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
+    else { if (p.inv <= 0) hurt(); b.y -= CRUSH_PUSH; p.attached = false; }
+    b.vy = b.speed; b.heavy = 0;
+  }
+  if (p.attached) p.y = b.y + PH;                        // 건물 바닥에 붙어서 같이 움직임 (건물이 움직인 뒤에 맞춤)
+  G.camY = clamp(clamp(G.camY + (p.y - CAM_FOLLOW - G.camY) * Math.min(1, CAM_LERP * dt), p.y - H + CAM_MARGIN, p.y - PH - CAM_MARGIN), WORLD_TOP, 0);
+  updateHaz(dt);
   // 콤보, 효과
   if (G.comboT > 0) { G.comboT -= dt; if (G.comboT <= 0) G.combo = 0; }
   if (G.pop) { G.pop.t -= dt; if (G.pop.t <= 0) G.pop = null; }
@@ -193,37 +289,30 @@ function outlined(text, x, y, size, fill, align) {
   ctx.strokeText(text, x, y); ctx.fillStyle = fill; ctx.fillText(text, x, y);
 }
 
-function drawBg() {
-  var g = ctx.createLinearGradient(0, 0, 0, GROUND);
-  g.addColorStop(0, '#4a6fa5'); g.addColorStop(1, '#f3c69b');
-  ctx.fillStyle = g; ctx.fillRect(-40, -40, W + 80, GROUND + 40);
+function mix(a, b, t) {                                  // 두 색 [r,g,b] 사이
+  return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * t) + ',' + Math.round(a[1] + (b[1] - a[1]) * t) + ',' + Math.round(a[2] + (b[2] - a[2]) * t) + ')';
+}
+
+function drawBg(cam) {                                   // 화면 좌표: 하늘은 올라갈수록 어두워지고, 도시는 천천히, 땅은 그대로 내려감
+  var t = cam / WORLD_TOP, g = ctx.createLinearGradient(0, 0, 0, GROUND);
+  g.addColorStop(0, mix([74, 111, 165], [8, 10, 36], t)); g.addColorStop(1, mix([243, 198, 155], [44, 62, 120], t));
+  ctx.fillStyle = g; ctx.fillRect(-40, -40, W + 80, H + 80);
   ctx.fillStyle = 'rgba(40,50,80,0.35)';
-  for (var i = 0; i < 12; i++) ctx.fillRect(i * 84 - 10, GROUND - 60 - (i * 37 % 70), 70, 140);
-  ctx.fillStyle = '#5b4a3a'; ctx.fillRect(-40, GROUND, W + 80, H - GROUND + 40);
-  ctx.fillStyle = '#7a6550'; ctx.fillRect(-40, GROUND, W + 80, 6);
+  for (var i = 0; i < 12; i++) ctx.fillRect(i * 84 - 10, GROUND - 60 - (i * 37 % 70) - cam * 0.5, 70, H);
+  ctx.fillStyle = '#5b4a3a'; ctx.fillRect(-40, GROUND - cam, W + 80, H - GROUND + 40);
+  ctx.fillStyle = '#7a6550'; ctx.fillRect(-40, GROUND - cam, W + 80, 6);
 }
 
 function drawBuilding() {
-  var b = G.b, n = b.floors.length, cw = b.w / b.cols;
-  for (var i = 0; i < n; i++) {
+  var b = G.b, n = b.floors.length, cw = b.w / b.cols, v = (b.y - G.camY) / FLOOR_H;
+  var i1 = Math.min(n, Math.floor(v) + 2);              // 화면에 보이는 층만 그림
+  for (var i = Math.max(0, Math.floor(v - H / FLOOR_H) - 1); i < i1; i++) {
     var f = b.floors[i], y = b.y - (i + 1) * FLOOR_H;
-    if (y > H || y < -FLOOR_H * 2) continue;
     ctx.fillStyle = b.wall; ctx.fillRect(b.x, y, b.w, FLOOR_H);
     ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(b.x, y + FLOOR_H - 4, b.w, 4);
     for (var c = 0; c < b.cols; c++) {
-      ctx.fillStyle = f.lit[c] ? '#ffe28a' : b.glass;
-      ctx.fillRect(b.x + c * cw + cw * 0.22, y + 10, cw * 0.56, FLOOR_H - 22);
-    }
-    var dmg = 1 - f.hp / f.max;
-    if (dmg > 0) {
-      ctx.fillStyle = 'rgba(0,0,0,' + (dmg * 0.35) + ')'; ctx.fillRect(b.x, y, b.w, FLOOR_H);
-      ctx.strokeStyle = '#222'; ctx.lineWidth = 2; ctx.beginPath();
-      for (var k = 0; k < Math.ceil(dmg * f.cracks.length); k++) {
-        var cx = b.x + f.cracks[k] * b.w;
-        ctx.moveTo(cx, y + FLOOR_H); ctx.lineTo(cx - 6, y + FLOOR_H * 0.6);
-        ctx.lineTo(cx + 5, y + FLOOR_H * 0.35); ctx.lineTo(cx - 3, y + 4);
-      }
-      ctx.stroke();
+      ctx.fillStyle = f[c] ? '#ffe28a' : b.glass;
+      ctx.fillRect(b.x + c * cw + cw * 0.22, y + 7, cw * 0.56, FLOOR_H - 16);
     }
   }
   var top = b.y - n * FLOOR_H;
@@ -261,7 +350,40 @@ function drawPlayer() {
   } else {
     drawHammer(d * 14, -30, d * 2.4);
   }
+  if (p.stun > 0 && Math.floor(clock * 16) % 2) { ctx.fillStyle = 'rgba(255,230,0,0.55)'; ctx.fillRect(-18, -PH - 4, 36, PH + 4); }
   ctx.restore();
+  if (p.stun > STUN_TIME - 0.6) outlined('찌릿!', p.x, p.y - PH - 24, 22, '#ffe600');
+}
+
+function drawHaz() {
+  for (var i = 0; i < G.haz.length; i++) {
+    var h = G.haz[i], x = h.x, y = h.y;
+    ctx.beginPath();
+    if (h.k === 'bolt') {                                // 빛나는 구슬 + 지그재그 번개
+      ctx.fillStyle = 'rgba(255,230,0,0.35)'; ctx.arc(x, y, h.r + 6, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#fff59d'; ctx.beginPath(); ctx.arc(x, y, h.r * 0.6, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = '#ffe600'; ctx.lineWidth = 3; ctx.beginPath();
+      ctx.moveTo(x + 4, y - 26); ctx.lineTo(x - 5, y - 14); ctx.lineTo(x + 4, y - 8); ctx.lineTo(x - 2, y + 4); ctx.stroke();
+    } else {                                             // 울퉁불퉁한 회색 바위
+      for (var k = 0; k < 8; k++) {
+        var a = k * Math.PI / 4, rr = h.r * h.s[k];
+        ctx.lineTo(x + Math.cos(a) * rr, y + Math.sin(a) * rr);
+      }
+      ctx.closePath(); ctx.fillStyle = '#8a8a8a'; ctx.fill();
+      ctx.strokeStyle = '#444'; ctx.lineWidth = 2; ctx.stroke();
+    }
+  }
+}
+
+function drawWave() {                                    // 필살 충격파: 위로 볼록한 밝은 초승달
+  var w = G.wave;
+  if (!w) return;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(255,214,0,0.55)'; ctx.lineWidth = 20;
+  ctx.beginPath(); ctx.arc(w.x, w.y + 80, 80, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 7;
+  ctx.beginPath(); ctx.arc(w.x, w.y + 80, 80, -Math.PI * 0.8, -Math.PI * 0.2); ctx.stroke();
+  ctx.lineCap = 'butt';
 }
 
 function drawParts() {
@@ -291,6 +413,11 @@ function drawHud() {
   ctx.fillRect(gx, gy, 180 * G.gauge / 100, 16);
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(gx, gy, 180, 16);
   outlined(full ? '필살 준비! X' : '필살', gx + 190, gy + 8, 16, '#fff', 'left');
+  var ax = 430, ok = G.guard >= GUARD_COST;                         // 방어 게이지 (부족하면 흐리게)
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(ax, gy, 120, 16);
+  ctx.fillStyle = ok ? '#3a86ff' : '#5a6478'; ctx.fillRect(ax, gy, 120 * G.guard / 100, 16);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(ax, gy, 120, 16);
+  outlined('방어', ax + 130, gy + 8, 16, ok ? '#fff' : '#aaa', 'left');
   outlined('SCORE ' + String(G.score).padStart(7, '0'), scoreX, y + 6, 22, '#fff', 'right');
   outlined('철거 ' + G.destroyed + '동', scoreX, y + 30, 16, '#ffd400', 'right');
 }
@@ -303,9 +430,10 @@ function overlay(lines) {
 function draw() {
   ctx.save();
   if (G.shake > 0) ctx.translate(rand(-1, 1) * G.shake * 24, rand(-1, 1) * G.shake * 24);
-  drawBg();
+  drawBg(G.camY || 0);
   if (G.state !== 'title') {
-    drawBuilding(); drawPlayer(); drawParts();
+    ctx.translate(0, -G.camY);                           // 여기부터 세계 좌표 (카메라만큼 올려 그림)
+    drawBuilding(); drawHaz(); drawWave(); drawPlayer(); drawParts();
     if (G.pop && G.pop.n >= 2) {
       var t = G.pop.t, size = 40 + Math.max(0, t - 0.6) * 80;
       ctx.globalAlpha = Math.min(1, t / 0.3);
@@ -318,11 +446,15 @@ function draw() {
   var blink = Math.floor(clock * 2) % 2 === 0 ? '#ffd400' : '#fff';
   if (G.state === 'title') {
     overlay([['철거반장', 110, 80, '#ffd400'], ['하늘에서 내려오는 건물을 망치로 부숴라!', 175, 22],
-      ['← → 이동    ↑ 점프    ↓ (누르고 있기) 막기', 250, 20], ['Z 망치 공격    X 필살기 (게이지 가득)    P 일시정지', 285, 20],
+      ['← → 이동    ↑ 로켓 점프 (휘두르며 닿으면 돌파)    ↓ 막기 (공중: 튕겨내기)', 250, 20],
+      ['Z 망치 (붙어서 치면 연쇄 낙하)    X 필살 충격파 (게이지 가득)    P 일시정지', 285, 20],
       [TOUCH ? '화면을 터치하거나 Enter / Space로 시작' : 'Enter 또는 Space로 시작', 390, 26, blink]]);
     return;
   }
   drawHud();
+  if (G.b.y < G.camY) outlined('▲ 건물까지 ' + Math.round((G.p.y - PH - G.b.y) / 10) + ' m', W / 2, TOUCH ? 64 : 26, 22, '#fff');
+  if (G.ev && G.ev.warn > 0) outlined(G.ev.k === 'bolt' ? '⚡ 번개 주의!' : '🪨 바위 주의!', W / 2, 120, 56,
+    Math.floor(clock * 6) % 2 ? '#ffd400' : '#fff');
   if (G.state === 'pause') overlay([['일시정지', 230, 56], [TOUCH ? 'II 버튼 또는 P로 계속' : 'P로 계속', 300, 22]]);
   if (G.state === 'over') overlay([['게임 오버', 190, 64, '#e63946'], ['점수 ' + String(G.score).padStart(7, '0'), 270, 30],
     ['철거한 건물 ' + G.destroyed + '동', 315, 22], [TOUCH ? '터치 또는 R로 다시 시작' : 'R로 다시 시작', 380, 24, blink]]);
