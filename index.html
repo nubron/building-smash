@@ -48,14 +48,19 @@ var W = 960, H = 540, GROUND = 480, FLOOR_H = 32;
 var WORLD_TOP = -3000;                                 // 세계 맨 위 (카메라 한계, 새 건물 등장 위치)
 var PW = 36, PH = 56, HEAD_Y = GROUND - PH;          // HEAD_Y: 깔림 판정선
 var GRAVITY = 1500, MOVE_SPEED = 280;
-var ROCKET_V = 1100, ROCKET_TOP = 40, PIERCE_MAX = 4;  // ↑: 중력 없이 솟구침 (건물 밖이면 WORLD_TOP+ROCKET_TOP까지), 휘두르며 닿으면 최대 4층 돌파
+var ROCKET_V = 1600, ROCKET_TOP = 40, PIERCE_MAX = 4;  // ↑: 중력 없이 솟구침 (건물 밖이면 WORLD_TOP+ROCKET_TOP까지), 휘두르며 닿으면 최대 4층 돌파
 var ATK_TIME = 0.12, ATK_COOLDOWN = 0.2, ATK_REACH = 46;
 var GUARD_PUSH = 90, AIR_GUARD_PUSH = 50, CRUSH_PUSH = 220;
-var GUARD_COST = 25, GUARD_REGEN = 6;                  // 방어 게이지: 1회 소모량, 초당 회복량
+var GUARD_COST = 15, GUARD_REGEN = 6;                  // 방어 게이지: 1회 소모량, 초당 회복량
 var FLOORS_BASE = 50, FLOORS_LEVEL = 10;               // 층수 = 50 + 10*레벨 (한 방에 한 층)
 var ENTER_SPEED = 400, ENTER_UNTIL = GROUND - 1.5 * H; // 등장: 바닥이 지면 위 1.5화면에 올 때까지 빠르게
 var B_BASE = 30, B_LEVEL = 4;                          // 기본 하강 속도 = 30 + 4*레벨
-var B_GRAV = 2400, B_VMAX = 700, HEAVY_TIME = 0.6, B_EASE = 2000;  // 연쇄 낙하: 가속, 최고 속도, 지속 시간, 끝난 뒤 감속
+var B_GRAV = 2400, B_VMAX = 480, HEAVY_TIME = 0.25, B_EASE = 3000; // 연쇄 낙하: 가속, 최고 속도, 지속 시간, 끝난 뒤 감속
+var HIT_STUN = 0.1, CHAIN_FALL_V = 60;                 // 맞은 건물의 경직 시간, 연쇄 낙하 중 건물 아래에서 플레이어 낙하 속도 한계
+// 연쇄 가속: 8타를 넘으면 6타에 걸쳐 건물 최고 속도 480 -> 900, 경직 0.1 -> 0.06초 (길게 칠수록 빨리 내려옴)
+var CHAIN_FREE = 8, CHAIN_STEPS = 6, B_VMAX_CHAIN = 900, HIT_STUN_MIN = 0.06;
+var GUARD_STUN = 0.25;                                 // 공중 막기에 튕겨난 건물의 경직 (그 사이 플레이어가 떨어져 연쇄가 끊김)
+var BLOCK_TIME = 0.25;                                 // 막기로 밀어낸 순간의 두 팔 뻗기 자세 시간
 var WAVE_SPEED = 1600, COLLAPSE_TIME = 0.5;            // 필살 충격파 속도, 건물 전체 붕괴 시간
 var CAM_FOLLOW = 380, CAM_LERP = 8, CAM_MARGIN = 60;   // 카메라: 발을 화면 y=380에, 따라가는 빠르기, 화면 끝 여유
 var COMBO_TIME = 1.5, GAUGE_PER_HIT = 1.5, INV_TIME = 2;
@@ -80,14 +85,15 @@ function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 function newGame() {
   G = {
     state: 'play', score: 0, hearts: 3, destroyed: 0, level: 0,
-    combo: 0, comboT: 0, gauge: 0, guard: 100, shake: 0, flash: 0, parts: [], pop: null, overAt: 0, ev: null, haz: [], camY: 0, wave: null,
-    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, rocket: false, attached: false, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0, stun: 0, pierce: 0 }
+    combo: 0, comboT: 0, gauge: 0, guard: 100, shake: 0, flash: 0, parts: [], pop: null, overAt: 0, ev: null, haz: [], camY: 0, wave: null, chain: 0,
+    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, rocket: false, attached: false, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0, stun: 0, pierce: 0, block: 0 }
   };
   pressed = {};
   spawnBuilding();
 }
 
 function spawnBuilding() {
+  G.chain = 0;
   var lv = G.level, n = FLOORS_BASE + FLOORS_LEVEL * lv, cols = 6 + Math.floor(rand(0, 7));
   var w = Math.round(W * rand(0.75, 0.85)), hue = Math.floor(rand(0, 360)), floors = [];
   for (var i = 0; i < n; i++) {
@@ -96,7 +102,7 @@ function spawnBuilding() {
     floors.push(lit);
   }
   G.b = {
-    x: (W - w) / 2, w: w, y: WORLD_TOP, vy: ENTER_SPEED, heavy: 0, crate: 0, cq: 0, floors: floors, cols: cols, entering: true,
+    x: (W - w) / 2, w: w, y: WORLD_TOP, vy: ENTER_SPEED, heavy: 0, stun: 0, crate: 0, cq: 0, floors: floors, cols: cols, entering: true,
     speed: B_BASE + B_LEVEL * lv, antenna: Math.random() < 0.5,
     wall: 'hsl(' + hue + ',' + Math.round(rand(15, 45)) + '%,' + Math.round(rand(38, 58)) + '%)',
     roof: 'hsl(' + hue + ',20%,28%)', glass: 'hsl(' + Math.round(rand(190, 230)) + ',35%,25%)'
@@ -114,10 +120,13 @@ function debris(x, y, n, color, spread) {
   if (G.parts.length > 600) G.parts.splice(0, G.parts.length - 600);
 }
 
+function chainK() { return clamp((G.chain - CHAIN_FREE) / CHAIN_STEPS, 0, 1); }   // 연쇄 가속 정도 0..1
+
 function tryHit() {
   var p = G.p, b = G.b, hb = p.y - PH, ht = hb - ATK_REACH;
   if (p.x + 22 < b.x || p.x - 22 > b.x + b.w || b.y < ht || b.y - FLOOR_H > hb) return;
   p.hitDone = true;
+  if (!p.onGround) G.chain++;                            // 공중 타격 = 연쇄 한 타 (건물이 사라지면 spawnBuilding에서 0)
   hitFloor();
   if (p.onGround || G.b !== b) return;
   p.attached = false; b.heavy = HEAVY_TIME;              // 연쇄 낙하: 머리 위가 비어 떨어지고, 건물은 더 빨리 쫓아옴
@@ -130,6 +139,7 @@ function hitFloor() {                                    // 망치 한 방 (공�
   G.gauge = Math.min(100, G.gauge + GAUGE_PER_HIT);
   G.pop = { x: p.x, y: b.y + 10, t: 0.8, n: G.combo };
   debris(p.x, b.y, 6, b.wall, 30);
+  b.stun = HIT_STUN - (HIT_STUN - HIT_STUN_MIN) * chainK();   // 경직: 맞은 충격으로 잠깐 멈춤 (연쇄가 길면 짧아짐)
   breakFloor();
 }
 
@@ -216,7 +226,7 @@ function update(dt) {
   }
   var under = p.x > b.x && p.x < b.x + b.w;
   if (p.attached && pressed.ArrowDown && G.guard >= GUARD_COST) {  // 공중 막기: 건물을 튕겨내고 떨어짐 (연쇄 낙하도 멈춤)
-    G.guard -= GUARD_COST; b.y -= AIR_GUARD_PUSH; b.vy = b.speed; b.heavy = 0; p.attached = false;
+    G.guard -= GUARD_COST; b.y -= AIR_GUARD_PUSH; b.vy = b.speed; b.heavy = 0; b.stun = GUARD_STUN; G.chain = 0; p.attached = false; p.block = BLOCK_TIME;
     G.shake = Math.max(G.shake, 0.1); debris(p.x, b.y, 8, '#fff', 30);
   }
   if (p.attached && !under) p.attached = false;          // 건물 밖으로 나가면 떨어짐
@@ -231,17 +241,22 @@ function update(dt) {
     if (p.rocket && p.y - PH <= WORLD_TOP + ROCKET_TOP) { p.y = WORLD_TOP + ROCKET_TOP + PH; p.rocket = false; }
   }
   if (!p.attached && !p.rocket && !p.onGround) {
-    p.vy += GRAVITY * dt; p.y += p.vy * dt;
-    if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; }
+    p.vy += GRAVITY * dt;
+    if (under && G.chain > 0) p.vy = Math.min(p.vy, CHAIN_FALL_V);   // 연쇄 낙하 중에는 천천히 떨어져 건물이 따라잡음
+    p.y += p.vy * dt;
+    if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; G.chain = 0; }
   }
-  p.cd -= dt; p.inv = Math.max(0, p.inv - dt);
+  p.cd -= dt; p.inv = Math.max(0, p.inv - dt); p.block = Math.max(0, p.block - dt);
   if (p.atk > 0) { p.atk -= dt; if (!p.hitDone && !p.rocket) tryHit(); }
-  // 건물: 연쇄 낙하 중에는 가속, 끝나면 기본(등장 중이면 등장) 속도로 돌아감
+  // 건물: 경직 중에는 멈춤(속도는 기억). 연쇄 낙하 중에는 가속, 끝나면 기본(등장 중이면 등장) 속도로 돌아감
   b = G.b;
   var base = b.entering ? ENTER_SPEED : b.speed;
-  if (b.heavy > 0) { b.heavy -= dt; b.vy = Math.min(B_VMAX, b.vy + B_GRAV * dt); }
-  else b.vy = Math.max(base, b.vy - B_EASE * dt);
-  b.y += b.vy * dt;
+  if (b.stun > 0) b.stun -= dt;
+  else {
+    if (b.heavy > 0) { b.heavy -= dt; b.vy = Math.min(B_VMAX + (B_VMAX_CHAIN - B_VMAX) * chainK(), b.vy + B_GRAV * dt); }
+    else { b.vy = Math.max(base, b.vy - B_EASE * dt); G.chain = 0; }   // 더 치지 않으면 연쇄 끝
+    b.y += b.vy * dt;
+  }
   if (b.y >= ENTER_UNTIL) b.entering = false;
   var w = G.wave;
   if (w) {                                               // 충격파: 건물 바닥에 닿으면 전체 붕괴 시작, 빗나가면 위로 사라짐
@@ -261,9 +276,9 @@ function update(dt) {
     p.attached = true; p.vy = 0;                         // 빠르게 쫓아온 건물이 떨어지는 플레이어 머리에 닿음: 다시 붙음 (감전 중·기본 속도일 땐 아님)
   }
   if (b.y >= HEAD_Y) {
-    if (under && p.guard) { G.guard -= GUARD_COST; b.y -= GUARD_PUSH; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
+    if (under && p.guard) { G.guard -= GUARD_COST; b.y -= GUARD_PUSH; p.block = BLOCK_TIME; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
     else { if (p.inv <= 0) hurt(); b.y -= CRUSH_PUSH; p.attached = false; }
-    b.vy = b.speed; b.heavy = 0;
+    b.vy = b.speed; b.heavy = 0; G.chain = 0;
   }
   if (p.attached) p.y = b.y + PH;                        // 건물 바닥에 붙어서 같이 움직임 (건물이 움직인 뒤에 맞춤)
   G.camY = clamp(clamp(G.camY + (p.y - CAM_FOLLOW - G.camY) * Math.min(1, CAM_LERP * dt), p.y - H + CAM_MARGIN, p.y - PH - CAM_MARGIN), WORLD_TOP, 0);
@@ -305,6 +320,7 @@ function drawBg(cam) {                                   // 화면 좌표: 하�
 
 function drawBuilding() {
   var b = G.b, n = b.floors.length, cw = b.w / b.cols, v = (b.y - G.camY) / FLOOR_H;
+  ctx.save(); if (b.stun > 0) ctx.translate(rand(-3, 3), 0);   // 경직 중 좌우 떨림 (그리기만)
   var i1 = Math.min(n, Math.floor(v) + 2);              // 화면에 보이는 층만 그림
   for (var i = Math.max(0, Math.floor(v - H / FLOOR_H) - 1); i < i1; i++) {
     var f = b.floors[i], y = b.y - (i + 1) * FLOOR_H;
@@ -319,6 +335,7 @@ function drawBuilding() {
   ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 2; ctx.strokeRect(b.x, top, b.w, n * FLOOR_H);
   ctx.fillStyle = b.roof; ctx.fillRect(b.x - 6, top - 8, b.w + 12, 8);
   if (b.antenna) { ctx.fillRect(b.x + b.w * 0.7, top - 40, 3, 32); ctx.fillRect(b.x + b.w * 0.7 - 10, top - 34, 23, 3); }
+  ctx.restore();
 }
 
 function drawHammer(px, py, ang) {
@@ -339,9 +356,16 @@ function drawPlayer() {
   ctx.fillStyle = '#f2c79b'; ctx.beginPath(); ctx.arc(0, -48 + c, 8, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = '#ffd400'; ctx.beginPath(); ctx.arc(0, -51 + c, 10, Math.PI, 0); ctx.fill();
   ctx.fillRect(-13, -52 + c, 26, 3);
-  if (p.guard) {
-    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(-22, -64, 44, 5);
-    ctx.fillStyle = '#9aa0a6'; ctx.fillRect(d > 0 ? 14 : -26, -70, 12, 17);
+  if (p.guard || p.block > 0) {                          // 막기: 두 팔을 위로 (밀어낸 순간에는 쭉 뻗고 손끝에 섬광), 망치는 등에
+    var top = p.block > 0 ? -PH - 22 : -PH - 8;
+    drawHammer(-d * 12, -20 + c, -d * 0.5);
+    ctx.fillStyle = '#f2c79b';
+    ctx.fillRect(-15, top, 6, -38 + c - top); ctx.fillRect(9, top, 6, -38 + c - top);
+    ctx.fillRect(-18, top - 5, 12, 6); ctx.fillRect(6, top - 5, 12, 6);
+    if (p.block > 0) {
+      ctx.strokeStyle = 'rgba(255,255,255,' + (p.block / BLOCK_TIME) + ')'; ctx.lineWidth = 4; ctx.beginPath();
+      ctx.arc(0, top + 16, 30, -Math.PI * 0.85, -Math.PI * 0.15); ctx.stroke();
+    }
   } else if (p.atk > 0) {
     var t = 1 - p.atk / ATK_TIME;
     drawHammer(d * 10, -36, d * 1.5 * (1 - t));
@@ -437,7 +461,8 @@ function draw() {
     if (G.pop && G.pop.n >= 2) {
       var t = G.pop.t, size = 40 + Math.max(0, t - 0.6) * 80;
       ctx.globalAlpha = Math.min(1, t / 0.3);
-      outlined(G.pop.n + ' 콤보', G.pop.x, G.pop.y + 40 - (0.8 - t) * 40, size, '#ffd400');
+      outlined(G.pop.n + ' 콤보', G.pop.x, G.pop.y + 40 - (0.8 - t) * 40, size,
+        mix([255, 212, 0], [255, 48, 32], clamp(G.chain / (CHAIN_FREE + CHAIN_STEPS), 0, 1)));   // 연쇄가 길수록 붉게
       ctx.globalAlpha = 1;
     }
   }
