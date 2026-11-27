@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>철거반장</title>
+<style>
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #111;
+    touch-action: none; user-select: none; -webkit-user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+  #pad, #pause, #rotate { display: none; }
+  .touch #pad, .touch #pause { display: block; }
+  .btn {
+    position: fixed; width: 64px; height: 64px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    border: 2px solid rgba(255,255,255,.5); background: rgba(255,255,255,.15);
+    color: #fff; font: bold 16px sans-serif; touch-action: none;
+  }
+  .btn.on { background: rgba(255,214,0,.45); }
+  #pause { top: 10px; right: 10px; width: 44px; height: 44px; font-size: 14px; }
+  #rotate {
+    position: fixed; inset: 0; z-index: 10; background: rgba(0,0,0,.88);
+    color: #fff; font: bold 22px sans-serif; align-items: center; justify-content: center;
+  }
+  @media (orientation: portrait) { .touch #rotate { display: flex; } }
+</style>
+</head>
+<body>
+<canvas id="game" width="960" height="540"></canvas>
+<div id="pad">
+  <div class="btn" data-k="ArrowLeft" style="left:16px;bottom:16px">◀</div>
+  <div class="btn" data-k="ArrowRight" style="left:92px;bottom:16px">▶</div>
+  <div class="btn" data-k="ArrowDown" style="right:92px;bottom:16px">막기</div>
+  <div class="btn" data-k="KeyZ" style="right:16px;bottom:16px">공격</div>
+  <div class="btn" data-k="ArrowUp" style="right:92px;bottom:92px">점프</div>
+  <div class="btn" data-k="KeyX" style="right:16px;bottom:92px">필살</div>
+</div>
+<div id="pause" class="btn" data-k="KeyP">II</div>
+<div id="rotate">가로로 돌려서 플레이하세요</div>
+<script>
+'use strict';
+// ---- 튜닝 값 ----
+var W = 960, H = 540, GROUND = 480, FLOOR_H = 48;
+var PW = 36, PH = 56, HEAD_Y = GROUND - PH;          // HEAD_Y: 깔림 판정선
+var GRAVITY = 1500, JUMP_V = 580, MOVE_SPEED = 280;
+var ATK_TIME = 0.12, ATK_COOLDOWN = 0.2, ATK_REACH = 46, ATK_DAMAGE = 1;
+var HIT_NUDGE = 3, GUARD_PUSH = 90, CRUSH_PUSH = 220;
+var ENTER_SPEED = 150, ENTER_UNTIL = 200;              // 등장 시 빠르게 내려오는 구간
+var COMBO_TIME = 1.5, GAUGE_PER_HIT = 4, INV_TIME = 2;
+var GRAYS = ['#777', '#999', '#555', '#aaa'];
+
+var canvas = document.getElementById('game');
+var ctx = canvas.getContext('2d');
+var TOUCH = 'ontouchstart' in window ||
+  !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+if (TOUCH) document.body.classList.add('touch');
+var keys = {}, pressed = {}, clock = 0;
+var G = { state: 'title' };
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
+
+function newGame() {
+  G = {
+    state: 'play', score: 0, hearts: 3, destroyed: 0, level: 0,
+    combo: 0, comboT: 0, gauge: 0, shake: 0, flash: 0, parts: [], pop: null, overAt: 0,
+    p: { x: W / 2, y: GROUND, vy: 0, dir: 1, onGround: true, guard: false, atk: 0, cd: 0, hitDone: true, inv: 0 }
+  };
+  pressed = {};
+  spawnBuilding();
+}
+
+function spawnBuilding() {
+  var lv = G.level, n = 3 + lv, hp = 3 + lv, cols = 6 + Math.floor(rand(0, 7));
+  var w = Math.round(W * rand(0.75, 0.85)), hue = Math.floor(rand(0, 360)), floors = [];
+  for (var i = 0; i < n; i++) {
+    var lit = [], cracks = [];
+    for (var c = 0; c < cols; c++) lit.push(Math.random() < 0.35);
+    for (var k = 0; k < 4; k++) cracks.push(rand(0.05, 0.95));
+    floors.push({ hp: hp, max: hp, lit: lit, cracks: cracks });
+  }
+  G.b = {
+    x: (W - w) / 2, w: w, y: 0, floors: floors, cols: cols, entering: true,
+    speed: 30 + 5 * lv, antenna: Math.random() < 0.5,
+    wall: 'hsl(' + hue + ',' + Math.round(rand(15, 45)) + '%,' + Math.round(rand(38, 58)) + '%)',
+    roof: 'hsl(' + hue + ',20%,28%)', glass: 'hsl(' + Math.round(rand(190, 230)) + ',35%,25%)'
+  };
+}
+
+function debris(x, y, n, color, spread) {
+  for (var i = 0; i < n; i++) {
+    var life = rand(0.6, 1.3);
+    G.parts.push({
+      x: x + rand(-0.5, 0.5) * spread, y: y, vx: rand(-180, 180), vy: rand(-260, 40),
+      s: rand(3, 9), c: Math.random() < 0.5 ? color : GRAYS[i % 4], life: life, max: life
+    });
+  }
+  if (G.parts.length > 600) G.parts.splice(0, G.parts.length - 600);
+}
+
+function tryHit() {
+  var p = G.p, b = G.b, hb = p.y - PH, ht = hb - ATK_REACH;
+  if (p.x + 22 < b.x || p.x - 22 > b.x + b.w || b.y < ht || b.y - FLOOR_H > hb) return;
+  p.hitDone = true;
+  var f = b.floors[0];
+  f.hp -= ATK_DAMAGE;
+  b.y -= HIT_NUDGE;
+  G.combo++; G.comboT = COMBO_TIME;
+  G.score += 10 * G.combo;
+  G.gauge = Math.min(100, G.gauge + GAUGE_PER_HIT);
+  G.pop = { x: p.x, y: b.y + 10, t: 0.8, n: G.combo };
+  debris(p.x, b.y, 6, b.wall, 30);
+  if (f.hp <= 0) breakFloor();
+}
+
+function breakFloor() {
+  var b = G.b;
+  debris(b.x + b.w / 2, b.y - FLOOR_H / 2, 45, b.wall, b.w);
+  b.floors.shift();
+  b.y -= FLOOR_H;
+  G.score += 100 * (G.level + 1);
+  G.shake = Math.max(G.shake, 0.25);
+  if (!b.floors.length) {
+    G.destroyed++; G.score += 1000 + 500 * G.level; G.level++;
+    G.shake = 0.5;
+    spawnBuilding();
+  }
+}
+
+function special() {
+  G.gauge = 0; G.flash = 0.35;
+  var n = Math.min(2, G.b.floors.length);
+  for (var i = 0; i < n; i++) breakFloor();
+}
+
+function hurt() {
+  G.hearts--; G.p.inv = INV_TIME; G.shake = 0.4; G.combo = 0;
+  if (G.hearts <= 0) { G.state = 'over'; G.overAt = clock; }
+}
+
+function update(dt) {
+  if (G.state !== 'play') { pressed = {}; return; }
+  var p = G.p, b = G.b;
+  // 플레이어
+  p.guard = !!keys.ArrowDown && p.onGround;
+  if (!p.guard) {
+    var mx = (keys.ArrowRight ? 1 : 0) - (keys.ArrowLeft ? 1 : 0);
+    if (mx) p.dir = mx;
+    p.x = clamp(p.x + mx * MOVE_SPEED * dt, PW / 2, W - PW / 2);
+    if (pressed.ArrowUp && p.onGround) { p.vy = -JUMP_V; p.onGround = false; }
+    if (pressed.KeyZ && p.cd <= 0) { p.atk = ATK_TIME; p.cd = ATK_COOLDOWN; p.hitDone = false; }
+    if (pressed.KeyX && G.gauge >= 100) special();
+  }
+  b = G.b;
+  p.vy += GRAVITY * dt; p.y += p.vy * dt;
+  if (p.y >= GROUND) { p.y = GROUND; p.vy = 0; p.onGround = true; }
+  var under = p.x > b.x && p.x < b.x + b.w;
+  if (under && p.vy < 0 && p.y - PH < b.y) { p.y = b.y + PH; p.vy = 0; } // 건물 바닥에 머리 쿵
+  p.cd -= dt; p.inv = Math.max(0, p.inv - dt);
+  if (p.atk > 0) { p.atk -= dt; if (!p.hitDone) tryHit(); }
+  // 건물
+  b = G.b;
+  b.y += (b.entering ? ENTER_SPEED : b.speed) * dt;
+  if (b.y >= ENTER_UNTIL) b.entering = false;
+  if (b.y >= HEAD_Y) {
+    under = p.x > b.x && p.x < b.x + b.w;
+    if (under && p.guard) { b.y -= GUARD_PUSH; G.shake = Math.max(G.shake, 0.12); debris(p.x, b.y, 8, '#ccc', 40); }
+    else { if (p.inv <= 0) hurt(); b.y -= CRUSH_PUSH; }
+    b.y = Math.max(60, b.y);
+  }
+  // 콤보, 효과
+  if (G.comboT > 0) { G.comboT -= dt; if (G.comboT <= 0) G.combo = 0; }
+  if (G.pop) { G.pop.t -= dt; if (G.pop.t <= 0) G.pop = null; }
+  G.shake = Math.max(0, G.shake - dt); G.flash = Math.max(0, G.flash - dt);
+  for (var i = G.parts.length - 1; i >= 0; i--) {
+    var q = G.parts[i];
+    q.vy += 900 * dt; q.x += q.vx * dt; q.y += q.vy * dt; q.life -= dt;
+    if (q.y > GROUND) { q.y = GROUND; q.vy *= -0.3; q.vx *= 0.6; }
+    if (q.life <= 0) G.parts.splice(i, 1);
+  }
+  pressed = {};
+}
+
+// ---- 그리기 ----
+function outlined(text, x, y, size, fill, align) {
+  ctx.font = 'bold ' + size + 'px "Malgun Gothic", sans-serif';
+  ctx.textAlign = align || 'center'; ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round'; ctx.lineWidth = Math.max(3, size / 7); ctx.strokeStyle = '#1a1a1a';
+  ctx.strokeText(text, x, y); ctx.fillStyle = fill; ctx.fillText(text, x, y);
+}
+
+function drawBg() {
+  var g = ctx.createLinearGradient(0, 0, 0, GROUND);
+  g.addColorStop(0, '#4a6fa5'); g.addColorStop(1, '#f3c69b');
+  ctx.fillStyle = g; ctx.fillRect(-40, -40, W + 80, GROUND + 40);
+  ctx.fillStyle = 'rgba(40,50,80,0.35)';
+  for (var i = 0; i < 12; i++) ctx.fillRect(i * 84 - 10, GROUND - 60 - (i * 37 % 70), 70, 140);
+  ctx.fillStyle = '#5b4a3a'; ctx.fillRect(-40, GROUND, W + 80, H - GROUND + 40);
+  ctx.fillStyle = '#7a6550'; ctx.fillRect(-40, GROUND, W + 80, 6);
+}
+
+function drawBuilding() {
+  var b = G.b, n = b.floors.length, cw = b.w / b.cols;
+  for (var i = 0; i < n; i++) {
+    var f = b.floors[i], y = b.y - (i + 1) * FLOOR_H;
+    if (y > H || y < -FLOOR_H * 2) continue;
+    ctx.fillStyle = b.wall; ctx.fillRect(b.x, y, b.w, FLOOR_H);
+    ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(b.x, y + FLOOR_H - 4, b.w, 4);
+    for (var c = 0; c < b.cols; c++) {
+      ctx.fillStyle = f.lit[c] ? '#ffe28a' : b.glass;
+      ctx.fillRect(b.x + c * cw + cw * 0.22, y + 10, cw * 0.56, FLOOR_H - 22);
+    }
+    var dmg = 1 - f.hp / f.max;
+    if (dmg > 0) {
+      ctx.fillStyle = 'rgba(0,0,0,' + (dmg * 0.35) + ')'; ctx.fillRect(b.x, y, b.w, FLOOR_H);
+      ctx.strokeStyle = '#222'; ctx.lineWidth = 2; ctx.beginPath();
+      for (var k = 0; k < Math.ceil(dmg * f.cracks.length); k++) {
+        var cx = b.x + f.cracks[k] * b.w;
+        ctx.moveTo(cx, y + FLOOR_H); ctx.lineTo(cx - 6, y + FLOOR_H * 0.6);
+        ctx.lineTo(cx + 5, y + FLOOR_H * 0.35); ctx.lineTo(cx - 3, y + 4);
+      }
+      ctx.stroke();
+    }
+  }
+  var top = b.y - n * FLOOR_H;
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 2; ctx.strokeRect(b.x, top, b.w, n * FLOOR_H);
+  ctx.fillStyle = b.roof; ctx.fillRect(b.x - 6, top - 8, b.w + 12, 8);
+  if (b.antenna) { ctx.fillRect(b.x + b.w * 0.7, top - 40, 3, 32); ctx.fillRect(b.x + b.w * 0.7 - 10, top - 34, 23, 3); }
+}
+
+function drawHammer(px, py, ang) {
+  ctx.save(); ctx.translate(px, py); ctx.rotate(ang);
+  ctx.fillStyle = '#8b5a2b'; ctx.fillRect(-2, -30, 4, 32);
+  ctx.fillStyle = '#9aa0a6'; ctx.fillRect(-10, -40, 20, 12);
+  ctx.restore();
+}
+
+function drawPlayer() {
+  var p = G.p;
+  if (p.inv > 0 && Math.floor(p.inv * 12) % 2) return;
+  var c = p.guard ? 8 : 0, d = p.dir;
+  ctx.save(); ctx.translate(p.x, p.y);
+  ctx.fillStyle = '#2b3a67'; ctx.fillRect(-14, -18, 11, 18); ctx.fillRect(3, -18, 11, 18);
+  ctx.fillStyle = '#f28c28'; ctx.fillRect(-16, -42 + c, 32, 26);
+  ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.fillRect(-16, -31 + c, 32, 4);
+  ctx.fillStyle = '#f2c79b'; ctx.beginPath(); ctx.arc(0, -48 + c, 8, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#ffd400'; ctx.beginPath(); ctx.arc(0, -51 + c, 10, Math.PI, 0); ctx.fill();
+  ctx.fillRect(-13, -52 + c, 26, 3);
+  if (p.guard) {
+    ctx.fillStyle = '#8b5a2b'; ctx.fillRect(-22, -64, 44, 5);
+    ctx.fillStyle = '#9aa0a6'; ctx.fillRect(d > 0 ? 14 : -26, -70, 12, 17);
+  } else if (p.atk > 0) {
+    var t = 1 - p.atk / ATK_TIME;
+    drawHammer(d * 10, -36, d * 1.5 * (1 - t));
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)'; ctx.lineWidth = 3; ctx.beginPath();
+    ctx.arc(d * 10, -36, 42, -Math.PI / 2 - 0.3, -Math.PI / 2 + 0.3); ctx.stroke();
+  } else {
+    drawHammer(d * 14, -30, d * 2.4);
+  }
+  ctx.restore();
+}
+
+function drawParts() {
+  for (var i = 0; i < G.parts.length; i++) {
+    var q = G.parts[i];
+    ctx.globalAlpha = Math.max(0, q.life / q.max); ctx.fillStyle = q.c;
+    ctx.fillRect(q.x - q.s / 2, q.y - q.s / 2, q.s, q.s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawHeart(x, y, on) {
+  ctx.fillStyle = on ? '#e63946' : 'rgba(0,0,0,0.4)';
+  ctx.beginPath(); ctx.moveTo(x, y + 6);
+  ctx.bezierCurveTo(x, y - 2, x - 12, y - 2, x - 12, y + 6);
+  ctx.bezierCurveTo(x - 12, y + 12, x, y + 18, x, y + 22);
+  ctx.bezierCurveTo(x, y + 18, x + 12, y + 12, x + 12, y + 6);
+  ctx.bezierCurveTo(x + 12, y - 2, x, y - 2, x, y + 6); ctx.fill();
+}
+
+function drawHud() {
+  var y = TOUCH ? 12 : GROUND + 14, scoreX = TOUCH ? W - 70 : W - 20;  // 터치: 버튼을 피해 위쪽에
+  for (var i = 0; i < 3; i++) drawHeart(30 + i * 30, y, i < G.hearts);
+  var gx = 120, gy = y + 4, full = G.gauge >= 100;
+  ctx.fillStyle = 'rgba(0,0,0,0.5)'; ctx.fillRect(gx, gy, 180, 16);
+  ctx.fillStyle = full ? (Math.floor(clock * 8) % 2 ? '#fff' : '#ffd400') : '#ff9f1c';
+  ctx.fillRect(gx, gy, 180 * G.gauge / 100, 16);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.strokeRect(gx, gy, 180, 16);
+  outlined(full ? '필살 준비! X' : '필살', gx + 190, gy + 8, 16, '#fff', 'left');
+  outlined('SCORE ' + String(G.score).padStart(7, '0'), scoreX, y + 6, 22, '#fff', 'right');
+  outlined('철거 ' + G.destroyed + '동', scoreX, y + 30, 16, '#ffd400', 'right');
+}
+
+function overlay(lines) {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
+  for (var i = 0; i < lines.length; i++) outlined(lines[i][0], W / 2, lines[i][1], lines[i][2], lines[i][3] || '#fff');
+}
+
+function draw() {
+  ctx.save();
+  if (G.shake > 0) ctx.translate(rand(-1, 1) * G.shake * 24, rand(-1, 1) * G.shake * 24);
+  drawBg();
+  if (G.state !== 'title') {
+    drawBuilding(); drawPlayer(); drawParts();
+    if (G.pop && G.pop.n >= 2) {
+      var t = G.pop.t, size = 40 + Math.max(0, t - 0.6) * 80;
+      ctx.globalAlpha = Math.min(1, t / 0.3);
+      outlined(G.pop.n + ' 콤보', G.pop.x, G.pop.y + 40 - (0.8 - t) * 40, size, '#ffd400');
+      ctx.globalAlpha = 1;
+    }
+  }
+  ctx.restore();
+  if (G.flash > 0) { ctx.fillStyle = 'rgba(255,255,255,' + (G.flash / 0.35) + ')'; ctx.fillRect(0, 0, W, H); }
+  var blink = Math.floor(clock * 2) % 2 === 0 ? '#ffd400' : '#fff';
+  if (G.state === 'title') {
+    overlay([['철거반장', 110, 80, '#ffd400'], ['하늘에서 내려오는 건물을 망치로 부숴라!', 175, 22],
+      ['← → 이동    ↑ 점프    ↓ (누르고 있기) 막기', 250, 20], ['Z 망치 공격    X 필살기 (게이지 가득)    P 일시정지', 285, 20],
+      [TOUCH ? '화면을 터치하거나 Enter / Space로 시작' : 'Enter 또는 Space로 시작', 390, 26, blink]]);
+    return;
+  }
+  drawHud();
+  if (G.state === 'pause') overlay([['일시정지', 230, 56], [TOUCH ? 'II 버튼 또는 P로 계속' : 'P로 계속', 300, 22]]);
+  if (G.state === 'over') overlay([['게임 오버', 190, 64, '#e63946'], ['점수 ' + String(G.score).padStart(7, '0'), 270, 30],
+    ['철거한 건물 ' + G.destroyed + '동', 315, 22], [TOUCH ? '터치 또는 R로 다시 시작' : 'R로 다시 시작', 380, 24, blink]]);
+}
+
+// ---- 입력 ----
+function press(code) {
+  if (!keys[code]) pressed[code] = true;
+  keys[code] = true;
+  if (G.state === 'title' && (code === 'Enter' || code === 'NumpadEnter' || code === 'Space')) newGame();
+  else if (code === 'KeyP' && (G.state === 'play' || G.state === 'pause')) G.state = G.state === 'play' ? 'pause' : 'play';
+  else if (code === 'KeyR' && G.state === 'over') newGame();
+}
+function release(code) { keys[code] = false; }
+
+var BLOCK = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Space'];
+window.addEventListener('keydown', function (e) {
+  if (BLOCK.indexOf(e.code) >= 0) e.preventDefault();
+  press(e.code);
+});
+window.addEventListener('keyup', function (e) { release(e.code); });
+window.addEventListener('blur', function () { keys = {}; });
+window.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+// 타이틀/게임오버: 아무 곳이나 탭 (게임오버 직후 1초는 연타로 바로 재시작되지 않게 무시)
+window.addEventListener('pointerdown', function () {
+  if (G.state === 'title' || (G.state === 'over' && clock - G.overAt > 1)) newGame();
+});
+// 터치 버튼: 버튼마다 누르고 있는 포인터 id를 따로 추적 (멀티터치)
+Array.prototype.forEach.call(document.querySelectorAll('[data-k]'), function (el) {
+  var k = el.getAttribute('data-k'), ids = {};
+  function down(e) {
+    if (e.cancelable) e.preventDefault();
+    try { el.releasePointerCapture(e.pointerId); } catch (err) { /* 캡처 해제: 손가락이 벗어나면 leave 발생 */ }
+    if (!keys[k]) { ids = {}; press(k); }
+    ids[e.pointerId] = true; el.classList.add('on');
+  }
+  function up(e) {
+    if (!ids[e.pointerId]) return;
+    delete ids[e.pointerId];
+    if (!Object.keys(ids).length) { release(k); el.classList.remove('on'); }
+  }
+  el.addEventListener('pointerdown', down);
+  el.addEventListener('pointerenter', function (e) { if (e.buttons) down(e); });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (t) { el.addEventListener(t, up); });
+});
+
+// ---- 화면 맞춤 (16:9 레터박스, 고해상도) ----
+function fit() {
+  var s = Math.min(window.innerWidth / W, window.innerHeight / H), dpr = window.devicePixelRatio || 1;
+  canvas.style.width = Math.floor(W * s) + 'px'; canvas.style.height = Math.floor(H * s) + 'px';
+  canvas.width = Math.round(W * s * dpr); canvas.height = Math.round(H * s * dpr);
+  ctx.setTransform(canvas.width / W, 0, 0, canvas.height / H, 0, 0);
+  if (TOUCH && window.innerHeight > window.innerWidth && G.state === 'play') G.state = 'pause';
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', function () { setTimeout(fit, 150); });
+fit();
+
+var last = null;
+function frame(t) {
+  var dt = last === null ? 0 : clamp((t - last) / 1000, 0, 0.05);
+  last = t; clock += dt;
+  update(dt); draw();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
